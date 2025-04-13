@@ -121,29 +121,38 @@ class DiffusionProcess:
         alpha_t = self.alphas[t].view(-1, 1, 1, 1)  # [batch, 1, 1, 1]
         sigma_t = self.sqrt_sigmas[t].view(-1, 1, 1, 1)  # [batch, 1, 1, 1]
         noise = torch.randn_like(x, device=self.device)
-        # VP-SDE: x_t = alpha(t) * x_0 + sigma_t * z
+        # VP-SDE: x_t = sqrt(alpha(t)) * x_0 + sigma_t * z
         noisy_x = torch.sqrt(alpha_t) * x + sigma_t * noise
         noisy_x = torch.clamp(noisy_x, -1, 1)
         return noisy_x, noise
 
-# DDIM 采样函数（适配 28x28）
+# DDIM 采样函数（适配 VP-SDE）
 @torch.no_grad()
 def generate(model, diffusion, labels, styles, device, image_size=(1, 28, 28), steps=100):
     model.eval()
     x = torch.randn((labels.size(0), *image_size), device=device, dtype=torch.float32)
-    timesteps = torch.linspace(diffusion.num_timesteps - 1, 0, steps + 1, dtype=torch.long, device=device)
-
+    # 离散时间步，从 t=T-1 到 0
+    step_indices = torch.linspace(diffusion.num_timesteps - 1, 0, steps + 1, dtype=torch.long, device=device)
+    
     for i in tqdm(range(steps), desc="Generating Steps"):
-        t = timesteps[i]
-        t_next = timesteps[i + 1]
+        t = step_indices[i]
+        t_next = step_indices[i + 1]
         t_tensor = torch.full((labels.size(0),), t, device=device)
         pred_noise = model(x, t_tensor, labels, styles)
-        alpha_bar_t = diffusion.alpha_bars[t].view(-1, 1, 1, 1)
-        alpha_bar_next = diffusion.alpha_bars[t_next].view(-1, 1, 1, 1)
-        x_0_pred = (x - torch.sqrt(1 - alpha_bar_t) * pred_noise) / torch.sqrt(alpha_bar_t)
-        x = torch.sqrt(alpha_bar_next) * x_0_pred + torch.sqrt(1 - alpha_bar_next) * pred_noise
+        
+        # VP-SDE 参数
+        alpha_t = diffusion.alphas[t].view(-1, 1, 1, 1)
+        sigma_t = diffusion.sqrt_sigmas[t].view(-1, 1, 1, 1)
+        alpha_t_next = diffusion.alphas[t_next].view(-1, 1, 1, 1)
+        sigma_t_next = diffusion.sqrt_sigmas[t_next].view(-1, 1, 1, 1)
+        
+        # DDIM 采样：预测 x_0 并更新 x_{t-1}
+        x_0_pred = (x - sigma_t * pred_noise) / torch.sqrt(alpha_t)
+        x_0_pred = torch.clamp(x_0_pred, -1, 1)  # 防止数值溢出
+        # DDIM 更新公式：x_{t-1} = sqrt(alpha_{t-1}) * x_0_pred + sigma_{t-1} * pred_noise
+        x = torch.sqrt(alpha_t_next) * x_0_pred + sigma_t_next * pred_noise
         x = torch.clamp(x, -1, 1)
-
+        
         if i % 20 == 0:
             tqdm.write(f"Step {i}: min={x.min().item():.4f}, max={x.max().item():.4f}")
 
