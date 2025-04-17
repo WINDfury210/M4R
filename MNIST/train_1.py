@@ -82,7 +82,7 @@ class ConditionalUNet(nn.Module):
             if residual.shape[1] == x.shape[1]:
                 x = x + residual
         x = torch.cat([x, skips[0]], dim=1)
-        x = self.final_conv(x)
+        x = self.final_conv(x) * 0.1
 
         return x
 
@@ -146,7 +146,7 @@ def generate(model, diffusion, labels, device, input_shape, steps=100, method="d
         s_theta = -pred_noise / sigma_t
         f_t = -0.5 * diffusion.betas[t] * x
         g_t = torch.sqrt(diffusion.betas[t])
-        dt = -1.0 / diffusion.num_timesteps
+        dt = torch.tensor(-1.0 / diffusion.num_timesteps, device=device)
         
         if method == "ddim":
             x_0_pred = (x - sigma_t * pred_noise) / torch.sqrt(alpha_t)
