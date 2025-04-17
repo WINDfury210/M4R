@@ -174,35 +174,29 @@ def generate(model, diffusion, labels, device, input_shape, steps=100, method="d
     
     return x
 
-# 定义训练函数（严格恢复原始逻辑）
-def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=250):
+# 定义训练函数
+def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=1000):
     model.train()
     for epoch in range(num_epochs):
         total_loss = 0
-        batch_count = 0
-        for x, labels, _ in dataloader:
+        for x, labels in dataloader:
             x = x.to(device, dtype=torch.float32)
             labels = labels.to(device)
-
             optimizer.zero_grad()
+            # t 从 0 到 num_timesteps-1
             t = torch.randint(0, diffusion.num_timesteps, (x.size(0),), device=device)
             noisy_x, noise = diffusion.add_noise(x, t)
             pred_noise = model(noisy_x, t, labels)
             loss = F.mse_loss(pred_noise, noise)
 
-            if torch.isnan(loss) or torch.isinf(loss):
-                continue  # 跳过 NaN loss
-
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-            batch_count += 1
 
-        avg_loss = total_loss / batch_count if batch_count > 0 else float('nan')
+        avg_loss = total_loss / len(dataloader)
         scheduler.step()
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
-    os.makedirs("models", exist_ok=True)
     torch.save(model.state_dict(), "models/cond_mnist_vp.pth")
     print("Model saved to models/cond_mnist_vp.pth")
 
@@ -218,7 +212,7 @@ def load_mnist_data():
     y = torch.tensor([train_dataset[i][1] for i in range(len(train_dataset))])
     print(f"Normalized X range: min={X.min().item():.4f}, max={X.max().item():.4f}")
     
-    return TensorDataset(X, y, torch.zeros_like(y))
+    return TensorDataset(X, y)
 
 # 主程序
 if __name__ == "__main__":
