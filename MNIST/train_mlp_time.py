@@ -155,8 +155,8 @@ def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs
         scheduler.step()
         tqdm.write(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
-    torch.save(model.state_dict(), "models/cond_hrd_style_mnist.pth")
-    print("Model saved to models/cond_hrd_style_mnist.pth")
+    torch.save(model.state_dict(), "models/cond_hrd_style_mnist_mlp_s.pth")
+    print("Model saved to models/cond_hrd_style_mnist_mlp_s.pth")
 
 # 加载 MNIST 数据并进行聚类
 def load_and_cluster_mnist_data(num_classes=10, num_clusters_per_class=5):
@@ -177,28 +177,28 @@ def load_and_cluster_mnist_data(num_classes=10, num_clusters_per_class=5):
         cls_mask = (y == cls).numpy()
         cls_data = X_flat[cls_mask]
         if len(cls_data) > num_clusters_per_class:
-            kmeans = KMeans(n_clusters=num_clusters_per_class, random_state=42).fit(cls_data)
+            kmeans = KMeans(n_clusters=num_clusters_per_class, n_init=num_clusters_per_class, random_state=42).fit(cls_data)
             style_labels[cls_mask] = torch.tensor(kmeans.labels_, dtype=torch.long)
 
     return TensorDataset(X, y, style_labels)
 
 # 主程序
 if __name__ == "__main__":
-    dataset = load_and_cluster_mnist_data()
+    dataset = load_and_cluster_mnist_data(num_classes=10, num_clusters_per_class=1)
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=4)
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalDiffusionModel(
         input_dim=1,
         output_dim=1,
         num_classes=10,
-        num_styles_per_class=5,
+        num_styles_per_class=1,
         time_dim=128,
-        channels=[64, 128, 256]
+        channels=[32, 64, 128, 128, 256]
     ).to(device)
     diffusion = DiffusionProcess(num_timesteps=500, device=device)
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.1)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
 
-    train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=250)
+    train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=500)

@@ -6,21 +6,23 @@ import os
 import numpy as np
 from tqdm import tqdm
 
-# 定义时间嵌入模块
 class TimeEmbedding(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, hidden_dim=256):
         super().__init__()
         self.dim = dim
-        half_dim = dim // 2
-        emb = torch.log(torch.tensor(10000.0, dtype=torch.float32)) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -emb)
-        self.register_buffer("emb", emb)
+        # MLP 结构：输入 1 维时间，输出 dim 维嵌入
+        self.mlp = nn.Sequential(
+            nn.Linear(1, hidden_dim),  # 输入时间 t（标量）
+            nn.ReLU(),                 # 非线性激活
+            nn.Linear(hidden_dim, hidden_dim),  # 隐藏层
+            nn.ReLU(),
+            nn.Linear(hidden_dim, dim)  # 输出到目标维度
+        )
 
     def forward(self, time):
-        emb = time[:, None] * self.emb[None, :]
-        emb = torch.cat((torch.sin(emb), torch.cos(emb)), dim=-1)
-        if self.dim % 2 == 1:
-            emb = F.pad(emb, (0, 1, 0, 0))
+        # time: [batch_size] -> [batch_size, 1]
+        time = time.unsqueeze(-1).float()
+        emb = self.mlp(time)  # [batch_size, dim]
         return emb
 
 # 定义调整后的条件 UNet 模型（适配 28x28）
@@ -145,21 +147,21 @@ def generate(model, diffusion, labels, styles, device, image_size=(1, 28, 28), s
 
 # 主程序
 if __name__ == "__main__":
-    model_path = "models/cond_hrd_style_mnist_small.pth"
+    model_path = "models/cond_hrd_style_mnist_mlp_s.pth"
     digits = list(range(10))
-    num_styles_per_digit = 5
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    save_path = "images/generated_grid_mnist.png"
+    num_styles_per_digit = 1
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    save_path = "images/generated_grid_mnist_mlp_s.png"
 
     model = ConditionalDiffusionModel(
         input_dim=1,
         output_dim=1,
         num_classes=10,
-        num_styles_per_class=5,
+        num_styles_per_class=num_styles_per_digit,
         time_dim=128,
-        channels=[64, 128]
+        channels=[32, 64, 128, 128, 256]
     ).to(device)
-    diffusion = DiffusionProcess(num_timesteps=100, device=device)
+    diffusion = DiffusionProcess(num_timesteps=500, device=device)
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found at {model_path}")
@@ -171,7 +173,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         labels = torch.tensor([i for i in range(10) for _ in range(num_styles_per_digit)], dtype=torch.long, device=device)
         styles = torch.arange(num_styles_per_digit, dtype=torch.long, device=device).repeat(10)
-        all_final_images = generate(model, diffusion, labels, styles, device, steps=100)
+        all_final_images = generate(model, diffusion, labels, styles, device, steps=300)
 
         print(f"Generated images min: {all_final_images.min().item()}, max: {all_final_images.max().item()}")
 
@@ -183,7 +185,8 @@ if __name__ == "__main__":
                 images_np[i, 0] = 2 * (img - img_min) / (img_max - img_min) - 1
         images_display = (images_np + 1) / 2
         images_display = np.clip(images_display, 0, 1)
-
+        
+        images_display = images_display.reshape(1, *images_display.shape )
         num_digits = len(digits)
         fig, axes = plt.subplots(num_digits, num_styles_per_digit, figsize=(num_styles_per_digit * 2, num_digits * 2))
         for i, digit in enumerate(digits):

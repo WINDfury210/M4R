@@ -182,14 +182,14 @@ def load_and_cluster_mnist_data(num_classes=10, num_clusters_per_class=5):
         cls_mask = (y == cls).numpy()
         cls_data = X_flat[cls_mask]
         if len(cls_data) > num_clusters_per_class:
-            kmeans = KMeans(n_clusters=num_clusters_per_class, random_state=42).fit(cls_data)
+            kmeans = KMeans(n_clusters=num_clusters_per_class, n_init=10, random_state=42).fit(cls_data)
             style_labels[cls_mask] = torch.tensor(kmeans.labels_, dtype=torch.long)
 
     return TensorDataset(X, y, style_labels)
 
 # 主程序
 if __name__ == "__main__":
-    dataset = load_and_cluster_mnist_data()
+    dataset = load_and_cluster_mnist_data(num_clusters_per_class=1)
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=4)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -197,13 +197,13 @@ if __name__ == "__main__":
         input_dim=1,
         output_dim=1,
         num_classes=10,
-        num_styles_per_class=5,
-        time_dim=128,
-        channels=[64, 64, 128, 128, 256]
+        num_styles_per_class=1,
+        time_dim=32,
+        channels=[16, 32, 32, 64, 64, 128]
     ).to(device)
-    diffusion = DiffusionProcess(num_timesteps=500, beta_min=0.0001, beta_max=0.02, device=device)
+    diffusion = DiffusionProcess(num_timesteps=300, beta_min=0.001, beta_max=0.001, device=device)
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.1)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.5)
 
-    train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=250)
+    train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=1000)
