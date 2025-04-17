@@ -308,4 +308,5 @@ if __name__ == "__main__":
         os.makedirs("images", exist_ok=True)
         plt.savefig(f"images/generated_mnist_{method}.png")
         print(f"Samples saved to images/generated_mnist_{method}.png")
-        plt.close(fig)
+        plt.close(fig) 
+        
