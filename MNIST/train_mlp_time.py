@@ -142,7 +142,7 @@ def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs
             x = data_transforms(x)
 
             optimizer.zero_grad()
-            t = torch.randint(0, diffusion.num_timesteps, (x.size(0),), device=device)
+            t = torch.randint(0, diffusion.num_timesteps, (x.size(0),2), device=device)
             noisy_x, noise = diffusion.add_noise(x, t)
             pred_noise = model(noisy_x, t, labels, styles)
             loss = F.mse_loss(pred_noise, noise)
