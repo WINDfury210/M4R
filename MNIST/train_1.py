@@ -27,7 +27,7 @@ class TimeEmbedding(nn.Module):
         emb = self.mlp(time)
         return emb
 
-# 定义条件 UNet 模型
+# 定义条件 UNet 模型（移除初始化）
 class ConditionalUNet(nn.Module):
     def __init__(self, input_dim, output_dim, num_classes, time_dim=128, channels=[64, 128, 256, 512]):
         super().__init__()
@@ -56,21 +56,6 @@ class ConditionalUNet(nn.Module):
 
         self.fc_time = nn.Linear(time_dim, channels[-1])
         self.fc_label = nn.Linear(time_dim, channels[-1])
-
-        # 初始化权重
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Embedding):
-                nn.init.normal_(m.weight, mean=0, std=0.02)
-        nn.init.normal_(self.final_conv.weight, mean=0, std=0.01)
-        if self.final_conv.bias is not None:
-            nn.init.zeros_(self.final_conv.bias)
 
     def forward(self, x, time, labels):
         time_emb = self.time_embedding(time)
@@ -112,7 +97,7 @@ class ConditionalDiffusionModel(nn.Module):
 
 # 定义 VP-SDE 扩散过程
 class DiffusionProcess:
-    def __init__(self, num_timesteps=500, beta_min=0.0001, beta_max=0.02, schedule="cosine", device="cpu"):
+    def __init__(self, num_timesteps=500, beta_min=0.0001, beta_max=0.01, schedule="cosine", device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         t = torch.linspace(0, 1, num_timesteps + 1, device=device, dtype=torch.float32)[:-1]
@@ -189,12 +174,13 @@ def generate(model, diffusion, labels, device, input_shape, steps=100, method="d
     
     return x
 
-# 定义训练函数
+# 定义训练函数（严格恢复原始逻辑）
 def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=250):
     model.train()
     for epoch in range(num_epochs):
         total_loss = 0
-        for batch_idx, (x, labels, _) in enumerate(dataloader):
+        batch_count = 0
+        for x, labels, _ in dataloader:
             x = x.to(device, dtype=torch.float32)
             labels = labels.to(device)
 
@@ -204,26 +190,15 @@ def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs
             pred_noise = model(noisy_x, t, labels)
             loss = F.mse_loss(pred_noise, noise)
 
-            # 调试 pred_noise 和梯度
-            if epoch < 5 and batch_idx == 0:
-                print(f"Epoch {epoch+1}, Batch {batch_idx}: pred_noise min={pred_noise.min().item():.4f}, max={pred_noise.max().item():.4f}, mean={pred_noise.mean().item():.4f}, std={pred_noise.std().item():.4f}")
-
             if torch.isnan(loss) or torch.isinf(loss):
-                print(f"NaN/Inf loss at Epoch {epoch+1}, Batch {batch_idx}")
-                continue
+                continue  # 跳过 NaN loss
 
             loss.backward()
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            # 调试梯度范数
-            if epoch < 5 and batch_idx == 0:
-                grad_norm = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
-                print(f"Epoch {epoch+1}, Batch {batch_idx}: grad_norm={grad_norm:.4f}")
-
             optimizer.step()
             total_loss += loss.item()
+            batch_count += 1
 
-        avg_loss = total_loss / len(dataloader)
+        avg_loss = total_loss / batch_count if batch_count > 0 else float('nan')
         scheduler.step()
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
@@ -258,9 +233,9 @@ if __name__ == "__main__":
         time_dim=128,
         channels=[64, 64, 128, 128, 256]
     ).to(device)
-    diffusion = DiffusionProcess(num_timesteps=500, beta_min=0.0001, beta_max=0.02, schedule="cosine", device=device)
+    diffusion = DiffusionProcess(num_timesteps=500, beta_min=0.0001, beta_max=0.01, schedule="cosine", device=device)
 
-    optimizer = optim.Adam(model.parameters(), lr=2e-4)  # 降低学习率
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.1)
     train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=250)
 
@@ -308,5 +283,4 @@ if __name__ == "__main__":
         os.makedirs("images", exist_ok=True)
         plt.savefig(f"images/generated_mnist_{method}.png")
         print(f"Samples saved to images/generated_mnist_{method}.png")
-        plt.close(fig) 
-        
+        plt.close(fig)
