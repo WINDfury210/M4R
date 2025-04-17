@@ -225,13 +225,13 @@ if __name__ == "__main__":
         output_dim=1,
         num_classes=10,
         time_dim=128,
-        channels=[64, 64, 128, 128, 256]
+        channels=[32, 64, 64, 128, 128, 256]
     ).to(device)
-    diffusion = DiffusionProcess(num_timesteps=500, beta_min=0.0001, beta_max=0.01, schedule="cosine", device=device)
+    diffusion = DiffusionProcess(num_timesteps=500, beta_min=0.0001, beta_max=0.01, schedule="linear", device=device)
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.1)
-    train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=250)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=0.1)
+    train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=500)
 
     model.eval()
     num_samples_per_digit = 10
