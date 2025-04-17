@@ -57,6 +57,21 @@ class ConditionalUNet(nn.Module):
         self.fc_time = nn.Linear(time_dim, channels[-1])
         self.fc_label = nn.Linear(time_dim, channels[-1])
 
+        # 初始化权重
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0, std=0.02)
+        nn.init.normal_(self.final_conv.weight, mean=0, std=0.01)
+        if self.final_conv.bias is not None:
+            nn.init.zeros_(self.final_conv.bias)
+
     def forward(self, x, time, labels):
         time_emb = self.time_embedding(time)
         label_emb = self.label_embedding(labels)
@@ -95,9 +110,9 @@ class ConditionalDiffusionModel(nn.Module):
     def forward(self, x, time, labels):
         return self.unet(x, time, labels)
 
-# 定义 VP-SDE 扩散过程（支持线性/余弦调度）
+# 定义 VP-SDE 扩散过程
 class DiffusionProcess:
-    def __init__(self, num_timesteps=500, beta_min=0.0001, beta_max=0.02, schedule="linear", device="cpu"):
+    def __init__(self, num_timesteps=500, beta_min=0.0001, beta_max=0.02, schedule="cosine", device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         t = torch.linspace(0, 1, num_timesteps + 1, device=device, dtype=torch.float32)[:-1]
@@ -122,14 +137,13 @@ class DiffusionProcess:
             noisy_x = torch.clamp(noisy_x, *clamp_range)
         return noisy_x, noise
 
-# 生成函数（支持 DDIM、DDPM、混合、PC 采样）
+# 生成函数
 @torch.no_grad()
-def generate(model, diffusion, labels, device, input_shape, steps=100, method="ddpm", eta=0.0, lambda_corrector=0.01, clamp_range=(-1, 1), save_intermediate=False, save_path="intermediate"):
+def generate(model, diffusion, labels, device, input_shape, steps=100, method="ddpm", eta=0.0, lambda_corrector=0.01, clamp_range=(-1, 1)):
     model.eval()
     x = torch.randn((labels.size(0), *input_shape), device=device, dtype=torch.float32)
     step_indices = torch.linspace(diffusion.num_timesteps - 1, 0, steps + 1, dtype=torch.long, device=device)
     
-    intermediates = []
     for i in tqdm(range(steps), desc=f"Generating Steps ({method})"):
         t = step_indices[i]
         t_next = step_indices[i + 1]
@@ -170,33 +184,19 @@ def generate(model, diffusion, labels, device, input_shape, steps=100, method="d
         if clamp_range:
             x = torch.clamp(x, *clamp_range)
         
-        if save_intermediate and i % 20 == 0:
-            intermediates.append(x.cpu().clone())
-            os.makedirs(save_path, exist_ok=True)
-            torch.save(intermediates[-1], f"{save_path}/step_{i}_{method}.pt")
-        
         if i % 20 == 0:
             tqdm.write(f"Step {i}: min={x.min().item():.4f}, max={x.max().item():.4f}")
     
-    return x, intermediates
-
-# 定义数据增强
-data_transforms = transforms.Compose([
-    transforms.RandomRotation(10),
-    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-    transforms.Lambda(lambda x: x + torch.randn_like(x) * 0.05)
-])
+    return x
 
 # 定义训练函数
 def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=250):
     model.train()
     for epoch in range(num_epochs):
         total_loss = 0
-        for x, labels, _ in dataloader:
+        for batch_idx, (x, labels, _) in enumerate(dataloader):
             x = x.to(device, dtype=torch.float32)
             labels = labels.to(device)
-
-            x = data_transforms(x)
 
             optimizer.zero_grad()
             t = torch.randint(0, diffusion.num_timesteps, (x.size(0),), device=device)
@@ -204,7 +204,22 @@ def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs
             pred_noise = model(noisy_x, t, labels)
             loss = F.mse_loss(pred_noise, noise)
 
+            # 调试 pred_noise 和梯度
+            if epoch < 5 and batch_idx == 0:
+                print(f"Epoch {epoch+1}, Batch {batch_idx}: pred_noise min={pred_noise.min().item():.4f}, max={pred_noise.max().item():.4f}, mean={pred_noise.mean().item():.4f}, std={pred_noise.std().item():.4f}")
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"NaN/Inf loss at Epoch {epoch+1}, Batch {batch_idx}")
+                continue
+
             loss.backward()
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # 调试梯度范数
+            if epoch < 5 and batch_idx == 0:
+                grad_norm = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
+                print(f"Epoch {epoch+1}, Batch {batch_idx}: grad_norm={grad_norm:.4f}")
+
             optimizer.step()
             total_loss += loss.item()
 
@@ -232,11 +247,9 @@ def load_mnist_data():
 
 # 主程序
 if __name__ == "__main__":
-    # 数据加载
     dataset = load_mnist_data()
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=4)
 
-    # 设备和模型
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalDiffusionModel(
         input_dim=1,
@@ -247,12 +260,10 @@ if __name__ == "__main__":
     ).to(device)
     diffusion = DiffusionProcess(num_timesteps=500, beta_min=0.0001, beta_max=0.02, schedule="cosine", device=device)
 
-    # 训练
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=2e-4)  # 降低学习率
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.1)
     train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=250)
 
-    # 生成样本（每种采样方式）
     model.eval()
     num_samples_per_digit = 10
     digits = list(range(10))
@@ -269,17 +280,15 @@ if __name__ == "__main__":
     with torch.no_grad():
         for method_config in sampling_methods:
             method = method_config["method"]
-            images, intermediates = generate(
+            images = generate(
                 model, diffusion, labels, device, input_shape,
                 steps=100, method=method, eta=method_config["eta"],
                 lambda_corrector=method_config["lambda_corrector"],
-                clamp_range=(-1, 1), save_intermediate=True,
-                save_path=f"intermediate/{method}"
+                clamp_range=(-1, 1)
             )
             all_images[method] = images.cpu().numpy()
             print(f"Generated {method} images: min={images.min().item():.4f}, max={images.max().item():.4f}")
 
-    # 可视化
     for method, images_np in all_images.items():
         images_display = (images_np + 1) / 2
         images_display = np.clip(images_display, 0, 1)
