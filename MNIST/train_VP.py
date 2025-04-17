@@ -127,12 +127,6 @@ class DiffusionProcess:
         noisy_x = torch.clamp(noisy_x, -1, 1)
         return noisy_x, noise
 
-# 定义数据增强（不变）
-data_transforms = transforms.Compose([
-    transforms.RandomRotation(10),
-    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-    transforms.Lambda(lambda x: x + torch.randn_like(x) * 0.05)
-])
 
 # 定义训练函数（微调）
 def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=1000):
@@ -143,9 +137,6 @@ def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs
             x = x.to(device, dtype=torch.float32)
             labels = labels.to(device)
             styles = styles.to(device)
-
-            x = data_transforms(x)
-
             optimizer.zero_grad()
             # t 从 0 到 num_timesteps-1
             t = torch.randint(0, diffusion.num_timesteps, (x.size(0),), device=device)
