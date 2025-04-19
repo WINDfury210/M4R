@@ -6,80 +6,9 @@ import numpy as np
 import os
 from tqdm import tqdm
 
-# 定义条件 UNet 模型（与训练一致）
-class ConditionalUNet(nn.Module):
-    def __init__(self, input_dim, output_dim, num_classes, time_dim=128, channels=[32, 64, 64, 128, 128, 256], use_time_embedding=True, time_embedding_type="sinusoidal"):
-        super().__init__()
-        self.time_embedding = TimeEmbedding(time_dim, embedding_type=time_embedding_type, use_time_embedding=use_time_embedding)
-        self.label_embedding = nn.Embedding(num_classes, time_dim)
-
-        self.channels = channels
-        self.num_layers = len(channels)
-
-        # 编码器
-        self.encoder_convs = nn.ModuleList()
-        self.encoder_res = nn.ModuleList()
-        in_channels = input_dim
-        for out_channels in channels:
-            self.encoder_convs.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1))
-            self.encoder_res.append(ResidualBlock(out_channels, out_channels))
-            in_channels = out_channels
-
-        # 解码器
-        self.decoder_convs = nn.ModuleList()
-        self.decoder_res = nn.ModuleList()
-        for i in range(len(channels) - 1):
-            in_channels = channels[-1 - i]
-            out_channels = channels[-2 - i]
-            self.decoder_convs.append(nn.ConvTranspose2d(in_channels, out_channels, kernel_size=3, padding=1))
-            self.decoder_res.append(ResidualBlock(out_channels, out_channels))
-        self.final_conv = nn.ConvTranspose2d(channels[0], output_dim, kernel_size=3, padding=1)
-
-        # 标签和时间嵌入投影
-        self.fc_time = nn.Linear(time_dim, channels[-1])
-        self.fc_label = nn.Linear(time_dim, channels[-1])
-
-        # 初始化权重
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Embedding):
-                nn.init.normal_(m.weight, mean=0, std=0.02)
-        nn.init.normal_(self.final_conv.weight, mean=0, std=0.01)
-        if self.final_conv.bias is not None:
-            nn.init.zeros_(self.final_conv.bias)
-
-    def forward(self, x, time, labels):
-        time_emb = self.time_embedding(time)
-        label_emb = self.label_embedding(labels)
-
-        time_emb = self.fc_time(time_emb).view(-1, self.channels[-1], 1, 1)
-        label_emb = self.fc_label(label_emb).view(-1, self.channels[-1], 1, 1)
-
-        # 编码器
-        for conv, res in zip(self.encoder_convs, self.encoder_res):
-            x = F.relu(conv(x))
-            x = res(x)
-
-        # 添加条件信息
-        x = x + time_emb + label_emb
-
-        # 解码器
-        for conv, res in zip(self.decoder_convs, self.decoder_res):
-            x = F.relu(conv(x))
-            x = res(x)
-        x = self.final_conv(x) * 0.1  # 缩放输出
-
-        return x
-
 # 定义时间嵌入模块
 class TimeEmbedding(nn.Module):
-    def __init__(self, dim, embedding_type="sinusoidal", use_time_embedding=True, hidden_dim=256):
+    def __init__(self, dim, embedding_type="linear", use_time_embedding=True, hidden_dim=256):
         super().__init__()
         self.dim = dim
         self.embedding_type = embedding_type
@@ -93,6 +22,8 @@ class TimeEmbedding(nn.Module):
         elif embedding_type == "linear":
             self.mlp = nn.Sequential(
                 nn.Linear(1, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, dim)
             )
@@ -111,28 +42,82 @@ class TimeEmbedding(nn.Module):
             time = time.unsqueeze(-1).float()
             return self.mlp(time)
 
-# 定义残差块
-class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
+# 定义条件 UNet 模型（匹配训练模型）
+class ConditionalUNet(nn.Module):
+    def __init__(self, input_dim, output_dim, num_classes, time_dim=128, channels=[32, 64, 64, 128, 128, 256], use_time_embedding=True, time_embedding_type="linear"):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU()
-        self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+        self.time_embedding = TimeEmbedding(time_dim, embedding_type=time_embedding_type, use_time_embedding=use_time_embedding)
+        self.label_embedding = nn.Embedding(num_classes, time_dim)
 
-    def forward(self, x):
-        residual = self.shortcut(x)
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += residual
-        out = self.relu(out)
-        return out
+        self.channels = channels
+        self.num_layers = len(channels)
+
+        # 编码器
+        self.encoder_convs = nn.ModuleList()
+        self.encoder_norms = nn.ModuleList()
+        in_channels = input_dim
+        for out_channels in channels:
+            self.encoder_convs.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1))
+            self.encoder_norms.append(nn.BatchNorm2d(out_channels))
+            in_channels = out_channels
+
+        # 解码器（通道数匹配训练模型）
+        decoder_channels = [384, 256, 192, 128, 96, 64]
+        self.decoder_convs = nn.ModuleList()
+        self.decoder_norms = nn.ModuleList()
+        in_channels = channels[-1]
+        for out_channels in decoder_channels[:-1]:
+            self.decoder_convs.append(nn.ConvTranspose2d(in_channels, out_channels, kernel_size=3, padding=1))
+            self.decoder_norms.append(nn.BatchNorm2d(out_channels))
+            in_channels = out_channels
+        self.final_conv = nn.ConvTranspose2d(in_channels, output_dim, kernel_size=3, padding=1)
+
+        # 标签和时间嵌入投影
+        self.fc_time = nn.Linear(time_dim, channels[-1])
+        self.fc_label = nn.Linear(time_dim, channels[-1])
+
+        # 初始化权重
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0, std=0.02)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+        nn.init.normal_(self.final_conv.weight, mean=0, std=0.01)
+        if self.final_conv.bias is not None:
+            nn.init.zeros_(self.final_conv.bias)
+
+    def forward(self, x, time, labels):
+        time_emb = self.time_embedding(time)
+        label_emb = self.label_embedding(labels)
+
+        time_emb = self.fc_time(time_emb).view(-1, self.channels[-1], 1, 1)
+        label_emb = self.fc_label(label_emb).view(-1, self.channels[-1], 1, 1)
+
+        # 编码器
+        for conv, norm in zip(self.encoder_convs, self.encoder_norms):
+            x = F.relu(norm(conv(x)))
+
+        # 添加条件信息
+        x = x + time_emb + label_emb
+
+        # 解码器
+        for conv, norm in zip(self.decoder_convs, self.decoder_norms):
+            x = F.relu(norm(conv(x)))
+        x = self.final_conv(x) * 0.1  # 缩放输出
+
+        return x
 
 # 定义扩散模型
 class ConditionalDiffusionModel(nn.Module):
-    def __init__(self, input_dim, output_dim, num_classes, time_dim=128, channels=[32, 64, 64, 128, 128, 256], use_time_embedding=True, time_embedding_type="sinusoidal"):
+    def __init__(self, input_dim, output_dim, num_classes, time_dim=128, channels=[32, 64, 64, 128, 128, 256], use_time_embedding=True, time_embedding_type="linear"):
         super().__init__()
         self.unet = ConditionalUNet(input_dim, output_dim, num_classes, time_dim, channels, use_time_embedding, time_embedding_type)
 
@@ -190,7 +175,7 @@ def generate(model, diffusion, labels, device, input_shape, steps=100, method="d
         
         if method == "ddim":
             x_0_pred = (x - sigma_t * pred_noise) / torch.sqrt(alpha_t)
-            x = torch.sqrt(alpha_t_next) * x_0_pred + sigma_t_next * prod_noise
+            x = torch.sqrt(alpha_t_next) * x_0_pred + sigma_t_next * pred_noise
         elif method == "hybrid":
             x_0_pred = (x - sigma_t * pred_noise) / torch.sqrt(alpha_t)
             x = torch.sqrt(alpha_t_next) * x_0_pred + sigma_t_next * pred_noise + eta * sigma_t_next * torch.randn_like(x)
@@ -226,7 +211,7 @@ if __name__ == "__main__":
         time_dim=128,
         channels=[32, 64, 64, 128, 128, 256],
         use_time_embedding=True,
-        time_embedding_type="sinusoidal"
+        time_embedding_type="linear"
     ).to(device)
     
     # 加载训练好的模型
