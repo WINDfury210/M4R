@@ -27,7 +27,7 @@ class TimeEmbedding(nn.Module):
         emb = self.mlp(time)
         return emb
 
-# 定义条件 UNet 模型（移除初始化）
+# 定义条件 UNet 模型
 class ConditionalUNet(nn.Module):
     def __init__(self, input_dim, output_dim, num_classes, time_dim=128, channels=[64, 128, 256, 512]):
         super().__init__()
@@ -164,7 +164,7 @@ def generate(model, diffusion, labels, device, input_shape, steps=100, method="d
                 t_next_tensor = torch.full((labels.size(0),), t_next, device=device)
                 pred_noise_next = model(x, t_next_tensor, labels)
                 s_theta_next = -pred_noise_next / sigma_t_next
-                x = x + lambda_corrector * s_theta_next + torch.sqrt(2 * lambda_corrector) * torch.randn_like(x)
+                x = x + lambda_corrector * s_theta_next + torch.sqrt(torch.tensor(2 * lambda_corrector, device=device)) * torch.randn_like(x)
         
         if clamp_range:
             x = torch.clamp(x, *clamp_range)
@@ -183,7 +183,6 @@ def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs
             x = x.to(device, dtype=torch.float32)
             labels = labels.to(device)
             optimizer.zero_grad()
-            # t 从 0 到 num_timesteps-1
             t = torch.randint(0, diffusion.num_timesteps, (x.size(0),), device=device)
             noisy_x, noise = diffusion.add_noise(x, t)
             pred_noise = model(noisy_x, t, labels)
@@ -245,36 +244,41 @@ if __name__ == "__main__":
         {"method": "pc", "eta": 0.0, "lambda_corrector": 0.01}
     ]
 
-    all_images = {}
     with torch.no_grad():
         for method_config in sampling_methods:
             method = method_config["method"]
-            images = generate(
-                model, diffusion, labels, device, input_shape,
-                steps=100, method=method, eta=method_config["eta"],
-                lambda_corrector=method_config["lambda_corrector"],
-                clamp_range=(-1, 1)
-            )
-            all_images[method] = images.cpu().numpy()
-            print(f"Generated {method} images: min={images.min().item():.4f}, max={images.max().item():.4f}")
+            try:
+                images = generate(
+                    model, diffusion, labels, device, input_shape,
+                    steps=100, method=method, eta=method_config["eta"],
+                    lambda_corrector=method_config["lambda_corrector"],
+                    clamp_range=(-1, 1)
+                )
+                images_np = images.cpu().numpy()
+                print(f"Generated {method} images: min={images.min().item():.4f}, max={images.max().item():.4f}")
 
-    for method, images_np in all_images.items():
-        images_display = (images_np + 1) / 2
-        images_display = np.clip(images_display, 0, 1)
-        
-        fig, axes = plt.subplots(len(digits), num_samples_per_digit, figsize=(num_samples_per_digit * 2, len(digits) * 2))
-        for i, digit in enumerate(digits):
-            for j in range(num_samples_per_digit):
-                idx = i * num_samples_per_digit + j
-                axes[i, j].imshow(images_display[idx, 0], cmap="gray", vmin=0, vmax=1)
-                axes[i, j].set_title(f"Sample {j+1}")
-                if j == 0:
-                    axes[i, j].set_ylabel(f"Digit {digit}")
-                axes[i, j].axis("off")
-        plt.suptitle(f"Sampling Method: {method.upper()}")
-        plt.tight_layout()
-        
-        os.makedirs("images", exist_ok=True)
-        plt.savefig(f"images/generated_mnist_{method}.png")
-        print(f"Samples saved to images/generated_mnist_{method}.png")
-        plt.close(fig)
+                # 立即保存图像
+                images_display = (images_np + 1) / 2
+                images_display = np.clip(images_display, 0, 1)
+                
+                fig, axes = plt.subplots(len(digits), num_samples_per_digit, figsize=(num_samples_per_digit * 2, len(digits) * 2))
+                for i, digit in enumerate(digits):
+                    for j in range(num_samples_per_digit):
+                        idx = i * num_samples_per_digit + j
+                        axes[i, j].imshow(images_display[idx, 0], cmap="gray", vmin=0, vmax=1)
+                        axes[i, j].set_title(f"Sample {j+1}")
+                        if j == 0:
+                            axes[i, j].set_ylabel(f"Digit {digit}")
+                        axes[i, j].axis("off")
+                plt.suptitle(f"Sampling Method: {method.upper()}")
+                plt.tight_layout()
+                
+                os.makedirs("images", exist_ok=True)
+                plt.savefig(f"images/generated_mnist_{method}.png")
+                print(f"Samples saved to images/generated_mnist_{method}.png")
+                plt.close(fig)
+            
+            except Exception as e:
+                print(f"Error in {method} sampling: {str(e)}")
+                print(f"Skipping {method} and continuing with next method.")
+                continue
