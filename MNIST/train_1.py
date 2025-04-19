@@ -27,9 +27,9 @@ class TimeEmbedding(nn.Module):
         emb = self.mlp(time)
         return emb
 
-# 定义条件 UNet 模型
+# 定义条件 UNet 模型（移除 style）
 class ConditionalUNet(nn.Module):
-    def __init__(self, input_dim, output_dim, num_classes, time_dim=128, channels=[64, 128, 256, 512]):
+    def __init__(self, input_dim, output_dim, num_classes, time_dim=128, channels=[32, 64, 128, 128, 256]):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim)
         self.label_embedding = nn.Embedding(num_classes, time_dim)
@@ -82,42 +82,37 @@ class ConditionalUNet(nn.Module):
             if residual.shape[1] == x.shape[1]:
                 x = x + residual
         x = torch.cat([x, skips[0]], dim=1)
-        x = self.final_conv(x) * 0.1
+        x = self.final_conv(x)
 
         return x
 
-# 定义条件扩散模型
+# 定义扩散模型（移除 style）
 class ConditionalDiffusionModel(nn.Module):
-    def __init__(self, input_dim, output_dim, num_classes, time_dim=128, channels=[64, 128, 256, 512]):
+    def __init__(self, input_dim, output_dim, num_classes, time_dim=128, channels=[32, 64, 128, 128, 256]):
         super().__init__()
         self.unet = ConditionalUNet(input_dim, output_dim, num_classes, time_dim, channels)
 
     def forward(self, x, time, labels):
         return self.unet(x, time, labels)
 
-# 定义 VP-SDE 扩散过程
+# 定义余弦调度的扩散过程
 class DiffusionProcess:
-    def __init__(self, num_timesteps=500, beta_min=0.0001, beta_max=0.01, schedule="cosine", device="cpu"):
+    def __init__(self, num_timesteps=500, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
-        t = torch.linspace(0, 1, num_timesteps + 1, device=device, dtype=torch.float32)[:-1]
-        
-        if schedule == "linear":
-            self.betas = torch.linspace(beta_min, beta_max, num_timesteps, device=device)
-            integrals = torch.cumsum(self.betas * (1.0 / num_timesteps), dim=0)
-            self.alphas = torch.exp(-0.5 * integrals)
-            self.sigma_squares = 1 - torch.exp(-integrals)
-        elif schedule == "cosine":
-            self.sigma_squares = 1 - torch.cos(np.pi * t)
-            self.alphas = 1 - self.sigma_squares
-            self.betas = torch.diff(self.sigma_squares, prepend=torch.tensor([0.0], device=device)) / (1.0 / num_timesteps)
-        self.sqrt_sigmas = torch.sqrt(self.sigma_squares)
+        t = torch.linspace(0, 1, num_timesteps, device=device, dtype=torch.float32)
+        betas = torch.linspace(1e-4, 0.02, num_timesteps, device=device, dtype=torch.float32)
+        self.betas = betas
+        self.alphas = 1 - self.betas
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+        self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
+        self.sqrt_one_minus_alpha_bars = torch.sqrt(1 - self.alpha_bars)
 
     def add_noise(self, x, t, clamp_range=(-1, 1)):
-        alpha_t = self.alphas[t].view(-1, *([1] * (x.dim() - 1)))
-        sigma_t = self.sqrt_sigmas[t].view(-1, *([1] * (x.dim() - 1)))
+        sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1, 1, 1)
+        sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alpha_bars[t].view(-1, 1, 1, 1)
         noise = torch.randn_like(x, device=self.device)
-        noisy_x = torch.sqrt(alpha_t) * x + sigma_t * noise
+        noisy_x = sqrt_alpha_bar * x + sqrt_one_minus_alpha_bar * noise
         if clamp_range:
             noisy_x = torch.clamp(noisy_x, *clamp_range)
         return noisy_x, noise
@@ -138,32 +133,34 @@ def generate(model, diffusion, labels, device, input_shape, steps=100, method="d
         if i % 20 == 0:
             print(f"Step {i}: pred_noise mean={pred_noise.mean().item():.4f}, std={pred_noise.std().item():.4f}")
         
-        alpha_t = diffusion.alphas[t].view(-1, *([1] * (x.dim() - 1)))
-        sigma_t = diffusion.sqrt_sigmas[t].view(-1, *([1] * (x.dim() - 1)))
-        alpha_t_next = diffusion.alphas[t_next].view(-1, *([1] * (x.dim() - 1)))
-        sigma_t_next = diffusion.sqrt_sigmas[t_next].view(-1, *([1] * (x.dim() - 1)))
-        
-        s_theta = -pred_noise / sigma_t
-        f_t = -0.5 * diffusion.betas[t] * x
-        g_t = torch.sqrt(diffusion.betas[t])
-        dt = torch.tensor(-1.0 / diffusion.num_timesteps, device=device)
+        alpha_bar_t = diffusion.alpha_bars[t].view(-1, 1, 1, 1)
+        alpha_bar_t_next = diffusion.alpha_bars[t_next].view(-1, 1, 1, 1)
+        sqrt_alpha_bar_t = diffusion.sqrt_alpha_bars[t].view(-1, 1, 1, 1)
+        sqrt_one_minus_alpha_bar_t = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1, 1, 1)
+        sqrt_alpha_bar_t_next = diffusion.sqrt_alpha_bars[t_next].view(-1, 1, 1, 1)
+        sqrt_one_minus_alpha_bar_t_next = diffusion.sqrt_one_minus_alpha_bars[t_next].view(-1, 1, 1, 1)
+        beta_t = diffusion.betas[t].view(-1, 1, 1, 1)
         
         if method == "ddim":
-            x_0_pred = (x - sigma_t * pred_noise) / torch.sqrt(alpha_t)
-            x = torch.sqrt(alpha_t_next) * x_0_pred + sigma_t_next * pred_noise
+            x_0_pred = (x - sqrt_one_minus_alpha_bar_t * pred_noise) / sqrt_alpha_bar_t
+            x = sqrt_alpha_bar_t_next * x_0_pred + sqrt_one_minus_alpha_bar_t_next * pred_noise
         elif method == "hybrid":
-            x_0_pred = (x - sigma_t * pred_noise) / torch.sqrt(alpha_t)
-            x = torch.sqrt(alpha_t_next) * x_0_pred + sigma_t_next * pred_noise + eta * sigma_t_next * torch.randn_like(x)
+            x_0_pred = (x - sqrt_one_minus_alpha_bar_t * pred_noise) / sqrt_alpha_bar_t
+            x = sqrt_alpha_bar_t_next * x_0_pred + sqrt_one_minus_alpha_bar_t_next * pred_noise + eta * sqrt_one_minus_alpha_bar_t_next * torch.randn_like(x)
         elif method == "ddpm":
-            bar_alpha_t = torch.prod(diffusion.alphas[:t + 1]).view(-1, *([1] * (x.dim() - 1)))
-            x = (x - (1 - alpha_t) / torch.sqrt(1 - bar_alpha_t) * pred_noise) / torch.sqrt(alpha_t)
-            x = x + sigma_t * torch.randn_like(x)
+            x = (x - (1 - alpha_bar_t) / sqrt_one_minus_alpha_bar_t * pred_noise) / torch.sqrt(diffusion.alphas[t])
+            if t > 0:
+                x = x + torch.sqrt(beta_t) * torch.randn_like(x)
         elif method == "pc":
+            s_theta = -pred_noise / sqrt_one_minus_alpha_bar_t
+            f_t = -0.5 * beta_t * x
+            g_t = torch.sqrt(beta_t)
+            dt = torch.tensor(-1.0 / diffusion.num_timesteps, device=device)
             x = x + (f_t - g_t**2 * s_theta) * dt + g_t * torch.sqrt(torch.abs(dt)) * torch.randn_like(x)
-            if lambda_corrector > 0:
+            if lambda_corrector > 0 and t_next > 0:
                 t_next_tensor = torch.full((labels.size(0),), t_next, device=device)
                 pred_noise_next = model(x, t_next_tensor, labels)
-                s_theta_next = -pred_noise_next / sigma_t_next
+                s_theta_next = -pred_noise_next / sqrt_one_minus_alpha_bar_t_next
                 x = x + lambda_corrector * s_theta_next + torch.sqrt(torch.tensor(2 * lambda_corrector, device=device)) * torch.randn_like(x)
         
         if clamp_range:
@@ -174,14 +171,24 @@ def generate(model, diffusion, labels, device, input_shape, steps=100, method="d
     
     return x
 
+# 定义数据增强
+data_transforms = transforms.Compose([
+    transforms.RandomRotation(10),
+    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+    transforms.Lambda(lambda x: x + torch.randn_like(x) * 0.05)
+])
+
 # 定义训练函数
-def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=1000):
+def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=500):
     model.train()
-    for epoch in range(num_epochs):
+    for epoch in tqdm(range(num_epochs), desc="Training Epochs"):
         total_loss = 0
         for x, labels in dataloader:
             x = x.to(device, dtype=torch.float32)
             labels = labels.to(device)
+
+            x = data_transforms(x)
+
             optimizer.zero_grad()
             t = torch.randint(0, diffusion.num_timesteps, (x.size(0),), device=device)
             noisy_x, noise = diffusion.add_noise(x, t)
@@ -194,12 +201,12 @@ def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs
 
         avg_loss = total_loss / len(dataloader)
         scheduler.step()
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
+        tqdm.write(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
-    torch.save(model.state_dict(), "models/cond_mnist_vp.pth")
-    print("Model saved to models/cond_mnist_vp.pth")
+    torch.save(model.state_dict(), "models/cond_mnist_mlp.pth")
+    print("Model saved to models/cond_mnist_mlp.pth")
 
-# 加载 MNIST 数据
+# 加载 MNIST 数据（移除聚类）
 def load_mnist_data():
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -224,12 +231,12 @@ if __name__ == "__main__":
         output_dim=1,
         num_classes=10,
         time_dim=128,
-        channels=[32, 64, 64, 128, 128, 256]
+        channels=[32, 64, 128, 128, 256]
     ).to(device)
-    diffusion = DiffusionProcess(num_timesteps=500, beta_min=0.0001, beta_max=0.01, schedule="linear", device=device)
+    diffusion = DiffusionProcess(num_timesteps=500, device=device)
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=0.1)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
     train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=500)
 
     model.eval()
@@ -257,7 +264,6 @@ if __name__ == "__main__":
                 images_np = images.cpu().numpy()
                 print(f"Generated {method} images: min={images.min().item():.4f}, max={images.max().item():.4f}")
 
-                # 立即保存图像
                 images_display = (images_np + 1) / 2
                 images_display = np.clip(images_display, 0, 1)
                 
