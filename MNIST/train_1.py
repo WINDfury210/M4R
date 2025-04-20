@@ -259,8 +259,7 @@ def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs
         avg_loss = total_loss / len(dataloader)
         loss_history.append(avg_loss)
         scheduler.step()
-        if (epoch + 1) % 100 == 0:
-            print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
+        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
         if (epoch + 1) % 1000 == 0:
             torch.save(model.state_dict(), f"models/cond_mnist_mlp_epoch_{epoch+1}.pth")
     torch.save(model.state_dict(), "models/cond_mnist_mlp_final.pth")
@@ -294,14 +293,14 @@ if __name__ == "__main__":
         input_dim=1,
         output_dim=1,
         num_classes=10,
-        time_dim=128,
-        channels=[16, 32, 64, 128, 256]
+        time_dim=1024,
+        channels=[64, 128, 256, 512]
     ).to(device)
-    diffusion = DiffusionProcess(num_timesteps=1000, device=device)
+    diffusion = DiffusionProcess(num_timesteps=100, device=device)
 
     optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1000, eta_min=1e-6)
-    loss_history = train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=1000)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=4000, eta_min=1e-6)
+    loss_history = train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=4000)
 
     model.eval()
     num_samples_per_digit = 10
