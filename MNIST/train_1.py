@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 # 定义时间嵌入模块
 class TimeEmbedding(nn.Module):
-    def __init__(self, dim, embedding_type="sinusoidal", hidden_dim=512):
+    def __init__(self, dim, embedding_type="sinusoidal", hidden_dim=1024):
         super().__init__()
         self.dim = dim
         self.embedding_type = embedding_type
@@ -78,7 +78,7 @@ class ResidualBlock(nn.Module):
 
 # 定义条件 UNet 模型
 class ConditionalUNet(nn.Module):
-    def __init__(self, input_dim, output_dim, num_classes, time_dim=512, channels=[32, 64, 128, 256]):
+    def __init__(self, input_dim, output_dim, num_classes, time_dim=1024, channels=[64, 128, 256, 512]):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim, embedding_type="sinusoidal")
         self.label_embedding = nn.Embedding(num_classes, time_dim)
@@ -94,7 +94,7 @@ class ConditionalUNet(nn.Module):
         for i, out_channels in enumerate(channels):
             self.encoder_convs.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1))
             self.encoder_res.append(ResidualBlock(out_channels, out_channels))
-            self.attentions.append(SelfAttention(out_channels) if i in [1, 2] else nn.Identity())  # 在 channels=64, 128 添加注意力
+            self.attentions.append(SelfAttention(out_channels) if i in [1, 2, 3] else nn.Identity())
             in_channels = out_channels
 
         self.decoder_convs = nn.ModuleList()
@@ -106,7 +106,7 @@ class ConditionalUNet(nn.Module):
             self.decoder_res.append(ResidualBlock(out_channels, out_channels))
         self.final_conv = nn.ConvTranspose2d(channels[0] + channels[0], output_dim, kernel_size=3, padding=1)
 
-        self.fc_time = nn.Linear(time_dim, channels[-1])
+        self.fc_time = nn.Sequential(nn.Linear(time_dim, time_dim), nn.ReLU(), nn.Linear(time_dim, channels[-1]))
         self.fc_label = nn.Linear(time_dim, channels[-1])
 
     def forward(self, x, time, labels):
@@ -138,7 +138,7 @@ class ConditionalUNet(nn.Module):
 
 # 定义扩散模型
 class ConditionalDiffusionModel(nn.Module):
-    def __init__(self, input_dim, output_dim, num_classes, time_dim=512, channels=[32, 64, 128, 256]):
+    def __init__(self, input_dim, output_dim, num_classes, time_dim=1024, channels=[64, 128, 256, 512]):
         super().__init__()
         self.unet = ConditionalUNet(input_dim, output_dim, num_classes, time_dim, channels)
 
@@ -157,7 +157,7 @@ def cosine_beta_schedule(num_timesteps):
 
 # 定义扩散过程
 class DiffusionProcess:
-    def __init__(self, num_timesteps=200, device="cpu"):
+    def __init__(self, num_timesteps=100, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         self.betas = cosine_beta_schedule(num_timesteps).to(device)
@@ -177,19 +177,19 @@ class DiffusionProcess:
 
 # 生成函数
 @torch.no_grad()
-def generate(model, diffusion, labels, device, input_shape, steps=1500, method="ddim", eta=0.0, lambda_corrector=0.0, clamp_range=(-1, 1)):
+def generate(model, diffusion, labels, device, input_shape, steps=2500, method="ddim", eta=0.0, lambda_corrector=0.0, clamp_range=(-1, 1)):
     model.eval()
     x = torch.randn((labels.size(0), *input_shape), device=device, dtype=torch.float32)
     step_indices = torch.linspace(diffusion.num_timesteps - 1, 0, steps + 1, dtype=torch.long, device=device)
     
-    for i in tqdm(range(steps), desc=f"Generating Steps ({method})"):
+    for i in tqdm(range(steps), desc=f"Generating ({method})"):
         t = step_indices[i]
         t_next = step_indices[i + 1]
         t_tensor = torch.full((labels.size(0),), t, device=device)
         pred_noise = model(x, t_tensor, labels)
         
-        if i % 200 == 0:
-            print(f"Step {i}: pred_noise mean={pred_noise.mean().item():.4f}, std={pred_noise.std().item():.4f}")
+        if i % 1000 == 0:
+            print(f"Step {i}: pred_noise mean={pred_noise.mean().item():.4f}")
         
         sqrt_alpha_bar = diffusion.sqrt_alpha_bars[t].view(-1, 1, 1, 1)
         sqrt_one_minus_alpha_bar = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1, 1, 1)
@@ -223,29 +223,25 @@ def generate(model, diffusion, labels, device, input_shape, steps=1500, method="
         if clamp_range:
             x = torch.clamp(x, *clamp_range)
         
-        if i % 200 == 0:
+        if i == steps - 1000:
             images_display = (x.cpu().numpy() + 1) / 2
             images_display = np.clip(images_display, 0, 1)
             os.makedirs("images", exist_ok=True)
-            for j in range(min(3, x.size(0))):  # 保存前 3 张
-                plt.imshow(images_display[j, 0], cmap="gray")
-                plt.axis("off")
-                plt.savefig(f"images/intermediate_mnist_step_{i}_sample_{j+1}_{method}.png")
-                plt.close()
+            plt.imshow(images_display[0, 0], cmap="gray")
+            plt.axis("off")
+            plt.savefig(f"images/intermediate_mnist_step_{i}_{method}.png")
+            plt.close()
     
     return x
 
-# 定义数据增强
-data_transforms = transforms.Compose([
-    transforms.RandomRotation(3),
-    transforms.Lambda(lambda x: x + torch.randn_like(x) * 0.01)
-])
+# 定义数据增强（禁用）
+data_transforms = transforms.Compose([])
 
 # 定义训练函数
 def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=4000):
     model.train()
     loss_history = []
-    for epoch in tqdm(range(num_epochs), desc="Training Epochs"):
+    for epoch in range(num_epochs):
         total_loss = 0
         for x, labels in dataloader:
             x = x.to(device, dtype=torch.float32)
@@ -255,7 +251,7 @@ def train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs
             t = torch.randint(0, diffusion.num_timesteps, (x.size(0),), device=device)
             noisy_x, noise = diffusion.add_noise(x, t)
             pred_noise = model(noisy_x, t, labels)
-            loss = F.mse_loss(pred_noise, noise)
+            loss = F.mse_loss(pred_noise, noise) + 1e-6 * sum(p.norm() for p in model.parameters())
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -298,14 +294,14 @@ if __name__ == "__main__":
         input_dim=1,
         output_dim=1,
         num_classes=10,
-        time_dim=512,
-        channels=[32, 64, 128, 256]
+        time_dim=128,
+        channels=[16, 32, 64, 128, 256]
     ).to(device)
-    diffusion = DiffusionProcess(num_timesteps=200, device=device)
+    diffusion = DiffusionProcess(num_timesteps=1000, device=device)
 
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=4000, eta_min=1e-6)
-    loss_history = train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=4000)
+    optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1000, eta_min=1e-6)
+    loss_history = train(model, dataloader, diffusion, optimizer, scheduler, device, num_epochs=1000)
 
     model.eval()
     num_samples_per_digit = 10
@@ -320,13 +316,12 @@ if __name__ == "__main__":
     ]
 
     with torch.no_grad():
-        # 仅运行 DDIM
         method_config = sampling_methods[0]  # DDIM
         method = method_config["method"]
         try:
             images = generate(
                 model, diffusion, labels, device, input_shape,
-                steps=1500, method=method, eta=method_config["eta"],
+                steps=2500, method=method, eta=method_config["eta"],
                 lambda_corrector=method_config["lambda_corrector"],
                 clamp_range=(-1, 1)
             )
