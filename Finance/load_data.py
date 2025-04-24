@@ -26,9 +26,15 @@ def download_stock(ticker, retries=3):
     """Download stock data with retries."""
     for attempt in range(retries):
         try:
+            # Validate ticker
+            ticker_obj = yf.Ticker(ticker)
+            if not ticker_obj.info:
+                print(f"Invalid ticker {ticker}")
+                return ticker, None
             data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
             if not data.empty and "Close" in data.columns:
-                closes = data["Close"].values
+                closes = data["Close"].iloc[:, 0].values if data["Close"].ndim > 1 else data["Close"].values
+                closes = np.ravel(closes)  # Ensure 1D
                 if len(closes) > 0 and not np.any(np.isnan(closes)):
                     return ticker, closes
                 else:
@@ -42,46 +48,56 @@ def download_stock(ticker, retries=3):
     print(f"Failed to download {ticker} after {retries} attempts")
     return ticker, None
 
+# Download VIX first to get reference dates
+print("Downloading VIX data...")
+vix_data = yf.download("^VIX", start=start_date, end=end_date, progress=False, auto_adjust=False)
+if vix_data.empty:
+    raise ValueError("Failed to download VIX data")
+vix = vix_data["Close"].values
+dates = vix_data.index  # Use VIX dates as reference
+n_days = len(dates)
+
 # Parallel download
 print("Downloading stock data...")
 stock_data = {}
-dates = None
 failed_tickers = []
-with ThreadPoolExecutor(max_workers=5) as executor:  # Reduce concurrency
+with ThreadPoolExecutor(max_workers=5) as executor:
     futures = {executor.submit(download_stock, ticker): ticker for ticker in sp500_tickers}
     for future in tqdm(as_completed(futures), total=len(sp500_tickers), desc="Stocks"):
         ticker, closes = future.result()
         if closes is not None:
-            stock_data[ticker] = closes
-            if dates is None:
-                dates = pd.date_range(start=start_date, end=end_date, freq="B")[:len(closes)]
+            # Reindex to VIX dates
+            stock_df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
+            stock_df = stock_df.reindex(dates, method="ffill")
+            closes = stock_df["Close"].iloc[:, 0].values if stock_df["Close"].ndim > 1 else stock_df["Close"].values
+            closes = np.ravel(closes)
+            if len(closes) == n_days and not np.any(np.isnan(closes)):
+                stock_data[ticker] = closes
+            else:
+                print(f"Skipping {ticker}: length {len(closes)} != {n_days} or contains NaN")
+                failed_tickers.append(ticker)
         else:
             failed_tickers.append(ticker)
-        time.sleep(0.5)  # Rate limit delay
+        time.sleep(1)  # Rate limit delay
 
 if failed_tickers:
     print(f"Failed tickers: {failed_tickers}")
-
-# Download VIX
-print("Downloading VIX data...")
-vix_data = yf.download("^VIX", start=start_date, end=end_date, progress=False, auto_adjust=False)
-vix = vix_data["Close"].values if not vix_data.empty else np.zeros(len(dates))
+if not stock_data:
+    raise ValueError("No valid stock data downloaded")
 
 # Convert to NumPy array
 n_stocks = len(stock_data)
-n_days = len(dates)
 returns_array = np.zeros((n_stocks, n_days - 1), dtype=np.float32)  # Store returns
 tickers = []
 
 print("Calculating returns...")
 for i, (ticker, closes) in enumerate(stock_data.items()):
     tickers.append(ticker)
-    closes = np.squeeze(closes)  # Ensure 1D array
-    if closes.ndim != 1:
-        print(f"Warning: {ticker} closes has shape {closes.shape}, skipping")
+    if closes.shape[0] != n_days:
+        print(f"Warning: {ticker} closes length {closes.shape[0]} != {n_days}, skipping")
         continue
     returns = (closes[1:] - closes[:-1]) / closes[:-1]  # Calculate returns
-    returns = np.squeeze(returns)  # Ensure 1D
+    returns = np.ravel(returns)  # Ensure 1D
     if returns.shape[0] != n_days - 1:
         print(f"Warning: {ticker} returns length {returns.shape[0]} != {n_days-1}, skipping")
         continue
@@ -96,3 +112,4 @@ torch.save({"returns": returns_tensor, "tickers": tickers, "dates": dates[1:]}, 
 torch.save(vix_tensor, vix_file)
 
 print(f"Data saved to {output_file} and {vix_file}")
+print(f"Saved {returns_tensor.shape[0]} stocks with {returns_tensor.shape[1]} days")
