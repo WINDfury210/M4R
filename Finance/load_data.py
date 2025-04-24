@@ -10,7 +10,7 @@ import time
 
 # Configuration
 start_date = "2019-01-01"  # 6 years
-end_date = "2024-12-31"
+end_date = "2025-01-01"
 output_dir = "financial_data"
 os.makedirs(output_dir, exist_ok=True)
 output_file = os.path.join(output_dir, "sp500_returns.pt")
@@ -20,7 +20,6 @@ vix_file = os.path.join(output_dir, "vix.pt")
 sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 sp500_tickers = pd.read_html(sp500_url)[0]["Symbol"].tolist()
 sp500_tickers = [ticker.replace(".", "-") for ticker in sp500_tickers]
-sp500_tickers = sp500_tickers[:100]  # Limit to 100 for testing
 
 def download_stock(ticker, retries=3):
     """Download stock data with retries."""
