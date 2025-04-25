@@ -11,23 +11,21 @@ import os
 
 # Configuration
 sequence_length = 252  # Hard-coded (change to 63 for alternative)
-epochs = 50  # Increased for convergence
+epochs = 75  # Increased for convergence
 batch_size = 32
-num_timesteps = 200  # Reduced for faster sampling
+num_timesteps = 100  # Reduced for DDIM
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 output_dir = "financial_outputs"
 model_file = os.path.join(output_dir, f"financial_diffusion_{sequence_length}.pth")
 os.makedirs(output_dir, exist_ok=True)
 time_dim = 512
-cond_dim = sequence_length
+cond_dim = 64  # VIX sequence embedding dimension
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load dataset statistics
 data = torch.load(data_file, weights_only=False)
-real_mean = data["sequences"].mean(dim=1, keepdim=True)  # [n_sequences, 1]
-real_std = data["sequences"].std(dim=1, keepdim=True)  # [n_sequences, 1]
-real_mean = real_mean.mean().item()  # Average across sequences
-real_std = real_std.mean().item()
+real_mean = data["sequences"].mean(dim=1, keepdim=True).mean().item()
+real_std = data["sequences"].std(dim=1, keepdim=True).mean().item()
 
 # Time embedding module
 class TimeEmbedding(nn.Module):
@@ -46,37 +44,48 @@ class TimeEmbedding(nn.Module):
 
 # Financial diffusion model
 class FinancialDiffusionModel(nn.Module):
-    def __init__(self, time_dim=512, cond_dim=sequence_length):
+    def __init__(self, time_dim=512, cond_dim=64, d_model=128):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim, "sinusoidal")
-        self.cond_embedding = nn.Conv1d(1, 64, kernel_size=3, padding=1)
-        self.emb_proj = nn.Linear(time_dim + 64, 64)
-        self.input_proj = nn.Conv1d(1, 64, kernel_size=3, padding=1)
+        self.cond_embedding = nn.Sequential(
+            nn.Conv1d(1, cond_dim, kernel_size=3, padding=1),
+            nn.LayerNorm([cond_dim, sequence_length]),
+            nn.ReLU()
+        )
+        self.emb_proj = nn.Linear(time_dim, d_model)
+        self.input_proj = nn.Sequential(
+            nn.Conv1d(1, d_model, kernel_size=3, padding=1),
+            nn.LayerNorm([d_model, sequence_length]),
+            nn.ReLU()
+        )
         self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=64, nhead=8, dim_feedforward=256, batch_first=True),
-            num_layers=4)
-        self.output = nn.Conv1d(64, 1, kernel_size=3, padding=1)
+            nn.TransformerEncoderLayer(d_model=d_model, nhead=8, dim_feedforward=512, batch_first=True),
+            num_layers=6)  # Increased layers
+        self.output = nn.Sequential(
+            nn.Conv1d(d_model, d_model // 2, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(d_model // 2, 1, kernel_size=3, padding=1)
+        )
         self.dropout = nn.Dropout(0.1)
     
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)  # [batch, 1, seq_len]
         time_emb = self.time_embedding(t)  # [batch, time_dim]
-        cond = cond.unsqueeze(1)  # [batch, 1, seq_len]
-        cond_emb = self.cond_embedding(cond).mean(dim=2)  # [batch, 64]
-        emb = torch.cat([time_emb, cond_emb], dim=1)  # [batch, time_dim + 64]
-        emb = self.emb_proj(emb).unsqueeze(1)  # [batch, 1, 64]
-        x = self.input_proj(x)  # [batch, 64, seq_len]
-        x = x.permute(0, 2, 1)  # [batch, seq_len, 64]
-        x = x + emb  # Broadcast: [batch, seq_len, 64]
-        x = self.transformer(x)  # [batch, seq_len, 64]
+        cond_emb = self.cond_embedding(cond.unsqueeze(1))  # [batch, cond_dim, seq_len]
+        emb = self.emb_proj(time_emb).unsqueeze(1)  # [batch, 1, d_model]
+        x = self.input_proj(x)  # [batch, d_model, seq_len]
+        x = x.permute(0, 2, 1)  # [batch, seq_len, d_model]
+        x = x + emb  # Broadcast: [batch, seq_len, d_model]
+        x = x + cond_emb.permute(0, 2, 1)  # Add condition: [batch, seq_len, d_model]
+        x = self.transformer(x)  # [batch, seq_len, d_model]
         x = self.dropout(x)
-        x = x.permute(0, 2, 1)  # [batch, 64, seq_len]
+        x = x.permute(0, 2, 1)  # [batch, d_model, seq_len]
         x = self.output(x).squeeze(1)  # [batch, seq_len]
         return x
 
-# Diffusion process
+# Diffusion process (DDIM)
 class Diffusion:
-    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.01):
+    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.005):
         self.num_timesteps = num_timesteps
         self.betas = torch.linspace(beta_start, beta_end, num_timesteps).to(device)
         self.alphas = 1.0 - self.betas
@@ -92,18 +101,25 @@ class Diffusion:
         loss = F.mse_loss(pred_noise, noise, reduction='none').mean(dim=[1])
         return (loss * self.sqrt_one_minus_alpha_bars[t] ** 2).mean()
 
-    def sample(self, model, cond, seq_len, steps, method="ddpm", eta=0.0):
+    def sample(self, model, cond, seq_len, steps, method="ddim", eta=0.0):
         model.eval()
         with torch.no_grad():
             x = torch.randn(cond.shape[0], seq_len, device=cond.device)
-            for i in range(steps - 1, -1, -1):
-                t = torch.full((cond.shape[0],), i, device=cond.device, dtype=torch.long)
+            skip = self.num_timesteps // steps
+            timesteps = torch.arange(self.num_timesteps - 1, -1, -skip, device=device)
+            for i, t_idx in enumerate(timesteps):
+                t = torch.full((cond.shape[0],), t_idx, device=cond.device, dtype=torch.long)
                 pred_noise = model(x, t, cond)
-                alpha = self.alphas[i]
-                alpha_bar = self.alpha_bars[i]
-                sigma = eta * torch.sqrt((1 - alpha_bar) / (1 - alpha)) * torch.sqrt(1 - alpha / alpha_bar)
-                noise = torch.randn_like(x) if i > 0 else 0
-                x = (x - (1 - alpha) / torch.sqrt(1 - alpha_bar) * pred_noise) / torch.sqrt(alpha) + sigma * noise
+                alpha_bar = self.alpha_bars[t_idx]
+                alpha_bar_prev = self.alpha_bars[max(t_idx - skip, 0)]
+                sigma = eta * torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar)) * torch.sqrt(1 - alpha_bar / alpha_bar_prev)
+                x = (x - (1 - alpha_bar) / torch.sqrt(1 - alpha_bar) * pred_noise) / torch.sqrt(alpha_bar)
+                if method == "ddim":
+                    x = torch.sqrt(alpha_bar_prev) * x + torch.sqrt(1 - alpha_bar_prev - sigma ** 2) * pred_noise
+                else:
+                    x = x / torch.sqrt(self.alphas[t_idx])
+                noise = torch.randn_like(x) if i < len(timesteps) - 1 else 0
+                x = x + sigma * noise
         return x
 
 # Financial dataset
@@ -117,10 +133,12 @@ class FinancialDataset(Dataset):
         return len(self.sequences)
     
     def __getitem__(self, idx):
-        return self.sequences[idx], self.conditions[idx]
+        seq = self.sequences[idx]
+        seq = seq + torch.randn_like(seq) * 0.01  # Data augmentation
+        return seq, self.conditions[idx]
 
 # Training function
-def train(model, diffusion, train_loader, optimizer, epochs, device):
+def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
     scaler = GradScaler('cuda')
     model.train()
     for epoch in range(epochs):
@@ -132,17 +150,19 @@ def train(model, diffusion, train_loader, optimizer, epochs, device):
             with autocast('cuda'):
                 loss = diffusion.training_loss(model, sequences, t, cond)
             scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # Gradient clipping
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
             total_loss += loss.item()
+        scheduler.step()  # Update learning rate
         avg_loss = total_loss / len(train_loader)
         if (epoch + 1) % 5 == 0:
             print(f"Epoch {epoch+1}, Avg Loss: {avg_loss:.4f}")
         torch.save(model.state_dict(), model_file)
 
 # Generation function
-def generate(model, diffusion, cond, device, seq_len, steps, method="ddpm", eta=0.0):
+def generate(model, diffusion, cond, device, seq_len, steps, method="ddim", eta=0.0):
     model.load_state_dict(torch.load(model_file))
     samples = diffusion.sample(model, cond, seq_len, steps, method, eta)
     samples = samples * real_std + real_mean  # Denormalize
@@ -155,20 +175,21 @@ if __name__ == "__main__":
                               shuffle=True, pin_memory=True)
     
     # Initialize model and diffusion
-    model = FinancialDiffusionModel(time_dim=time_dim, cond_dim=cond_dim).to(device)
+    model = FinancialDiffusionModel(time_dim=time_dim, cond_dim=cond_dim, d_model=128).to(device)
     diffusion = Diffusion(num_timesteps)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     
     # Train
     print(f"Training with sequence length {sequence_length}...")
-    train(model, diffusion, train_loader, optimizer, epochs, device)
+    train(model, diffusion, train_loader, optimizer, scheduler, epochs, device)
     print("Training completed.")
     
     # Generate samples
     print(f"Generating samples with length {sequence_length}...")
     cond = torch.ones(10, sequence_length, device=device) * 0.2
     samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
-                       steps=num_timesteps, method="ddpm")
+                       steps=50, method="ddim")  # DDIM with fewer steps
     
     # Save generated samples
     samples_np = samples.cpu().numpy()
@@ -177,7 +198,7 @@ if __name__ == "__main__":
         plt.plot(samples_np[i], label=f"Sample {i+1}")
     plt.xlabel("Day")
     plt.ylabel("Return")
-    plt.ylim(-3 * real_std, 3 * real_std)  # Set Y-axis range
+    plt.ylim(-3 * real_std, 3 * real_std)
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"generated_returns_{sequence_length}.png"))
