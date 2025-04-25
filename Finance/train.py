@@ -21,7 +21,7 @@ os.makedirs(output_dir, exist_ok=True)
 time_dim = 512
 cond_dim = 64
 d_model = 256  # Increased model width
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda"ソー if torch.cuda.is_available() else "cpu")
 
 # Load dataset statistics
 data = torch.load(data_file, weights_only=False)
@@ -76,7 +76,7 @@ class FinancialDiffusionModel(nn.Module):
         self.input_proj = nn.Sequential(
             nn.Conv1d(1, d_model, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.LayerNorm(d_model)
+            nn.LayerNorm([d_model, sequence_length])
         )
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=d_model, nhead=8, 
@@ -215,7 +215,7 @@ if __name__ == "__main__":
     print(f"Generating samples with length {sequence_length}...")
     cond = torch.ones(10, sequence_length, device=device) * 0.2
     samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
-                       steps=200, method="ddim")  # Increased steps
+                       steps=200, method="ddim")
     
     # Save generated samples
     samples_np = samples.cpu().numpy()
