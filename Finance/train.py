@@ -11,16 +11,21 @@ import os
 
 # Configuration
 sequence_length = 252  # Hard-coded (change to 63 for alternative)
-epochs = 20  # Increased for better convergence
+epochs = 30  # Increased for better convergence
 batch_size = 32
-num_timesteps = 500  # Increased for finer diffusion
+num_timesteps = 500
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 output_dir = "financial_outputs"
 model_file = os.path.join(output_dir, f"financial_diffusion_{sequence_length}.pth")
 os.makedirs(output_dir, exist_ok=True)
 time_dim = 512
-cond_dim = 1
+cond_dim = sequence_length  # VIX sequence as condition
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load dataset statistics
+data = torch.load(data_file, weights_only=False)
+seq_mean = data["sequences"].mean().item()
+seq_std = data["sequences"].std().item()
 
 # Time embedding module
 class TimeEmbedding(nn.Module):
@@ -39,11 +44,11 @@ class TimeEmbedding(nn.Module):
 
 # Financial diffusion model
 class FinancialDiffusionModel(nn.Module):
-    def __init__(self, time_dim=512, cond_dim=1):
+    def __init__(self, time_dim=512, cond_dim=sequence_length):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim, "sinusoidal")
-        self.cond_embedding = nn.Linear(cond_dim, time_dim)
-        self.emb_proj = nn.Linear(time_dim, 64)
+        self.cond_embedding = nn.Conv1d(1, 64, kernel_size=3, padding=1)  # Process VIX sequence
+        self.emb_proj = nn.Linear(time_dim + 64, 64)  # Combine time and condition
         self.input_proj = nn.Conv1d(1, 64, kernel_size=3, padding=1)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=64, nhead=8, dim_feedforward=256, batch_first=True),
@@ -54,8 +59,9 @@ class FinancialDiffusionModel(nn.Module):
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)  # [batch, 1, seq_len]
         time_emb = self.time_embedding(t)  # [batch, time_dim]
-        cond_emb = self.cond_embedding(cond)  # [batch, time_dim]
-        emb = time_emb + cond_emb  # [batch, time_dim]
+        cond = cond.unsqueeze(1)  # [batch, 1, seq_len]
+        cond_emb = self.cond_embedding(cond).mean(dim=2)  # [batch, 64]
+        emb = torch.cat([time_emb, cond_emb], dim=1)  # [batch, time_dim + 64]
         emb = self.emb_proj(emb).unsqueeze(1)  # [batch, 1, 64]
         x = self.input_proj(x)  # [batch, 64, seq_len]
         x = x.permute(0, 2, 1)  # [batch, seq_len, 64]
@@ -68,7 +74,7 @@ class FinancialDiffusionModel(nn.Module):
 
 # Diffusion process
 class Diffusion:
-    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.01):
+    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.02):  # Increased beta_end
         self.num_timesteps = num_timesteps
         self.betas = torch.linspace(beta_start, beta_end, num_timesteps).to(device)
         self.alphas = 1.0 - self.betas
@@ -103,7 +109,7 @@ class FinancialDataset(Dataset):
     def __init__(self, data_file):
         data = torch.load(data_file, weights_only=False)
         self.sequences = data["sequences"]
-        self.conditions = data["conditions"]
+        self.conditions = data["conditions"]  # [n_sequences, seq_len]
     
     def __len__(self):
         return len(self.sequences)
@@ -115,9 +121,9 @@ class FinancialDataset(Dataset):
 def train(model, diffusion, train_loader, optimizer, epochs, device):
     scaler = GradScaler('cuda')
     model.train()
-    for epoch in range(epochs):
+    for epoch in tqdm(range(epochs), desc="Training"):
         total_loss = 0
-        for sequences, cond in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+        for sequences, cond in train_loader:
             sequences = sequences.to(device)
             cond = cond.to(device)
             t = torch.randint(0, diffusion.num_timesteps, (sequences.shape[0],), device=device)
@@ -129,13 +135,16 @@ def train(model, diffusion, train_loader, optimizer, epochs, device):
             optimizer.zero_grad()
             total_loss += loss.item()
         avg_loss = total_loss / len(train_loader)
-        print(f"Epoch {epoch+1}, Avg Loss: {avg_loss:.4f}")
+        if (epoch + 1) % 5 == 0:
+            print(f"Epoch {epoch+1}, Avg Loss: {avg_loss:.4f}")
         torch.save(model.state_dict(), model_file)
 
 # Generation function
 def generate(model, diffusion, cond, device, seq_len, steps, method="ddpm", eta=0.0):
     model.load_state_dict(torch.load(model_file))
-    return diffusion.sample(model, cond, seq_len, steps, method, eta)
+    samples = diffusion.sample(model, cond, seq_len, steps, method, eta)
+    samples = samples * seq_std + seq_mean  # Denormalize
+    return samples
 
 # Main execution
 if __name__ == "__main__":
@@ -154,9 +163,9 @@ if __name__ == "__main__":
     
     # Generate samples
     print(f"Generating samples with length {sequence_length}...")
-    cond = torch.tensor([[0.2]], device=device).repeat(10, 1)
+    cond = torch.ones(10, sequence_length, device=device) * 0.2  # VIX sequence
     samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
-                       steps=num_timesteps, method="ddpm")  # Match steps to num_timesteps
+                       steps=num_timesteps, method="ddpm")
     
     # Save generated samples
     samples_np = samples.cpu().numpy()
