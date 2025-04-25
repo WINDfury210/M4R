@@ -20,8 +20,8 @@ model_file = os.path.join(output_dir, f"financial_diffusion_{sequence_length}.pt
 os.makedirs(output_dir, exist_ok=True)
 time_dim = 512
 cond_dim = 64
-d_model = 256  # Increased model width
-device = torch.device("cuda"ソー if torch.cuda.is_available() else "cpu")
+d_model = 256
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load dataset statistics
 data = torch.load(data_file, weights_only=False)
@@ -76,7 +76,7 @@ class FinancialDiffusionModel(nn.Module):
         self.input_proj = nn.Sequential(
             nn.Conv1d(1, d_model, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.LayerNorm([d_model, sequence_length])
+            nn.LayerNorm(d_model)
         )
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=d_model, nhead=8, 
@@ -91,12 +91,14 @@ class FinancialDiffusionModel(nn.Module):
     
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)  # [batch, 1, seq_len]
-        x_res = x
         time_emb = self.time_embedding(t)  # [batch, time_dim]
         cond_emb = self.cond_embedding(cond)  # [batch, seq_len, cond_dim]
         emb = self.emb_proj(time_emb).unsqueeze(1)  # [batch, 1, d_model]
-        x = self.input_proj(x)  # [batch, d_model, seq_len]
-        x = x + x_res.mean(dim=1, keepdim=True)  # Residual
+        x = self.input_proj[0](x)  # Conv1d: [batch, d_model, seq_len]
+        x = self.input_proj[1](x)  # ReLU
+        x = x.permute(0, 2, 1)    # [batch, seq_len, d_model]
+        x = self.input_proj[2](x)  # LayerNorm
+        x = x.permute(0, 2, 1)    # [batch, d_model, seq_len]
         x = x.permute(0, 2, 1)  # [batch, seq_len, d_model]
         x = x + emb  # Broadcast
         x = x + cond_emb  # [batch, seq_len, d_model]
