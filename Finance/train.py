@@ -242,6 +242,7 @@ if __name__ == "__main__":
     print(f"Generated ACF (lags 1-5): {gen_acf[1:6].tolist()}")
     print(f"Real ACF (lags 1-5): {real_acf[1:6].tolist()}")
     
+    
     # Save ACF plot
     plt.figure(figsize=(8, 4))
     plt.plot(gen_acf, label="Generated")
