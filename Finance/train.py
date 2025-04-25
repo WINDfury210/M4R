@@ -3,14 +3,14 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import GradScaler, autocast  # Updated AMP API
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
 
 # Configuration
-sequence_length = 252  # Hard-coded sequence length (change to 63 for alternative)
+sequence_length = 252  # Hard-coded (change to 63 for alternative)
 epochs = 10
 batch_size = 32
 num_timesteps = 200
@@ -43,24 +43,27 @@ class FinancialDiffusionModel(nn.Module):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim, "sinusoidal")
         self.cond_embedding = nn.Linear(cond_dim, time_dim)
+        self.emb_proj = nn.Linear(time_dim, 64)  # Project emb to d_model
         self.input_proj = nn.Conv1d(1, 64, kernel_size=3, padding=1)
         self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=64, nhead=8, dim_feedforward=256), num_layers=4)
+            nn.TransformerEncoderLayer(d_model=64, nhead=8, dim_feedforward=256, batch_first=True),  # Enable batch_first
+            num_layers=4)
         self.output = nn.Conv1d(64, 1, kernel_size=3, padding=1)
         self.dropout = nn.Dropout(0.1)
     
     def forward(self, x, t, cond):
-        x = x.unsqueeze(1)
-        time_emb = self.time_embedding(t)
-        cond_emb = self.cond_embedding(cond)
-        emb = time_emb + cond_emb
-        x = self.input_proj(x)
-        x = x.permute(0, 2, 1)
-        x = x + emb.unsqueeze(1)
-        x = self.transformer(x)
+        x = x.unsqueeze(1)  # [batch, 1, seq_len]
+        time_emb = self.time_embedding(t)  # [batch, time_dim]
+        cond_emb = self.cond_embedding(cond)  # [batch, time_dim]
+        emb = time_emb + cond_emb  # [batch, time_dim]
+        emb = self.emb_proj(emb).unsqueeze(1)  # [batch, 1, 64]
+        x = self.input_proj(x)  # [batch, 64, seq_len]
+        x = x.permute(0, 2, 1)  # [batch, seq_len, 64]
+        x = x + emb  # Broadcast: [batch, seq_len, 64]
+        x = self.transformer(x)  # [batch, seq_len, 64]
         x = self.dropout(x)
-        x = x.permute(0, 2, 1)
-        x = self.output(x).squeeze(1)
+        x = x.permute(0, 2, 1)  # [batch, 64, seq_len]
+        x = self.output(x).squeeze(1)  # [batch, seq_len]
         return x
 
 # Diffusion process
@@ -110,7 +113,7 @@ class FinancialDataset(Dataset):
 
 # Training function
 def train(model, diffusion, train_loader, optimizer, epochs, device):
-    scaler = GradScaler()
+    scaler = GradScaler('cuda')  # Updated API
     model.train()
     for epoch in range(epochs):
         total_loss = 0
@@ -118,7 +121,7 @@ def train(model, diffusion, train_loader, optimizer, epochs, device):
             sequences = sequences.to(device)
             cond = cond.to(device)
             t = torch.randint(0, diffusion.num_timesteps, (sequences.shape[0],), device=device)
-            with autocast():
+            with autocast('cuda'):  # Updated API
                 loss = diffusion.training_loss(model, sequences, t, cond)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
