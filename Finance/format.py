@@ -3,44 +3,33 @@ import os
 from tqdm import tqdm
 
 # Configuration
-sequence_lengths = [63, 252]  # Hard-coded sequence lengths
-input_file = "financial_data/sp500_returns.pt"
-vix_file = "financial_data/vix.pt"
-output_dir = "financial_data/sequences"
+data_dir = "financial_data"
+output_dir = os.path.join(data_dir, "sequences")
 os.makedirs(output_dir, exist_ok=True)
+sequence_lengths = [63, 252]
+stride = 63
 
 # Load data
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-data = torch.load(input_file, weights_only=False)
-returns = data["returns"].to(device)  # [n_stocks, n_days], e.g., [98, 1508]
-tickers = data["tickers"]
-dates = data["dates"]
-vix = torch.load(vix_file, weights_only=False).to(device)  # [n_days], e.g., [1508]
+sp500_data = torch.load(os.path.join(data_dir, "sp500_returns.pt"), weights_only=False)
+vix_data = torch.load(os.path.join(data_dir, "vix.pt"), weights_only=False)
 
-# Generate sequences for each length
+# Format sequences
 for seq_len in sequence_lengths:
     sequences = []
     conditions = []
-    print(f"Generating sequences of length {seq_len}...")
-    step = seq_len // 4  # Dynamic step size, e.g., 15 for 63, 63 for 252
-    for i in tqdm(range(returns.shape[0]), desc=f"Processing stocks (len={seq_len})"):
-        stock_returns = returns[i]
-        stock_vix = vix
-        for start in range(0, len(stock_returns) - seq_len + 1, step):
-            seq = stock_returns[start:start + seq_len]
-            cond = stock_vix[start:start + seq_len].mean()
-            if seq.shape[0] == seq_len and not torch.isnan(seq).any():
-                sequences.append(seq)
-                conditions.append(cond)
+    n_stocks, n_days = sp500_data.shape
+    for stock_idx in tqdm(range(n_stocks), desc=f"Formatting sequences (length={seq_len})"):
+        stock_data = sp500_data[stock_idx]
+        for start in range(0, n_days - seq_len + 1, stride):
+            sequence = stock_data[start:start + seq_len]
+            vix_sequence = vix_data[start:start + seq_len]  # VIX sequence
+            if sequence.shape[0] == seq_len and vix_sequence.shape[0] == seq_len:
+                sequences.append(sequence)
+                conditions.append(vix_sequence)
     
-    # Stack sequences
-    if sequences:
-        sequences = torch.stack(sequences)
-        conditions = torch.stack(conditions).unsqueeze(-1)
-        output_file = os.path.join(output_dir, f"sequences_{seq_len}.pt")
-        torch.save({"sequences": sequences.cpu(), "conditions": conditions.cpu(), "tickers": tickers}, 
-                   output_file)
-        print(f"Saved {sequences.shape[0]} sequences of length {seq_len} to {output_file}")
-    else:
-        print(f"No sequences generated for length {seq_len}")
+    # Save sequences
+    sequences = torch.stack(sequences)  # [n_sequences, seq_len]
+    conditions = torch.stack(conditions)  # [n_sequences, seq_len]
+    output_file = os.path.join(output_dir, f"sequences_{seq_len}.pt")
+    torch.save({"sequences": sequences, "conditions": conditions}, output_file)
+    print(f"Saved {sequences.shape[0]} sequences of length {seq_len} to {output_file}")

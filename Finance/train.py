@@ -11,15 +11,15 @@ import os
 
 # Configuration
 sequence_length = 252  # Hard-coded (change to 63 for alternative)
-epochs = 75  # Increased for convergence
+epochs = 75
 batch_size = 32
-num_timesteps = 100  # Reduced for DDIM
+num_timesteps = 100
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 output_dir = "financial_outputs"
 model_file = os.path.join(output_dir, f"financial_diffusion_{sequence_length}.pth")
 os.makedirs(output_dir, exist_ok=True)
 time_dim = 512
-cond_dim = 64  # VIX sequence embedding dimension
+cond_dim = 64
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load dataset statistics
@@ -48,19 +48,19 @@ class FinancialDiffusionModel(nn.Module):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim, "sinusoidal")
         self.cond_embedding = nn.Sequential(
-            nn.Conv1d(1, cond_dim, kernel_size=3, padding=1),
-            nn.LayerNorm([cond_dim, sequence_length]),
+            nn.GRU(input_size=1, hidden_size=cond_dim, num_layers=2, batch_first=True, bidirectional=True),
+            nn.Linear(cond_dim * 2, cond_dim),
             nn.ReLU()
         )
         self.emb_proj = nn.Linear(time_dim, d_model)
         self.input_proj = nn.Sequential(
             nn.Conv1d(1, d_model, kernel_size=3, padding=1),
-            nn.LayerNorm([d_model, sequence_length]),
+            nn.LayerNorm(d_model),
             nn.ReLU()
         )
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=d_model, nhead=8, dim_feedforward=512, batch_first=True),
-            num_layers=6)  # Increased layers
+            num_layers=8)
         self.output = nn.Sequential(
             nn.Conv1d(d_model, d_model // 2, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -71,13 +71,15 @@ class FinancialDiffusionModel(nn.Module):
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)  # [batch, 1, seq_len]
         time_emb = self.time_embedding(t)  # [batch, time_dim]
-        cond_emb = self.cond_embedding(cond.unsqueeze(1))  # [batch, cond_dim, seq_len]
+        cond_emb, _ = self.cond_embedding(cond.unsqueeze(-1))  # [batch, seq_len, cond_dim]
         emb = self.emb_proj(time_emb).unsqueeze(1)  # [batch, 1, d_model]
         x = self.input_proj(x)  # [batch, d_model, seq_len]
         x = x.permute(0, 2, 1)  # [batch, seq_len, d_model]
         x = x + emb  # Broadcast: [batch, seq_len, d_model]
-        x = x + cond_emb.permute(0, 2, 1)  # Add condition: [batch, seq_len, d_model]
+        x = x + cond_emb  # [batch, seq_len, d_model]
+        x_res = x
         x = self.transformer(x)  # [batch, seq_len, d_model]
+        x = x + x_res  # Residual connection
         x = self.dropout(x)
         x = x.permute(0, 2, 1)  # [batch, d_model, seq_len]
         x = self.output(x).squeeze(1)  # [batch, seq_len]
@@ -134,7 +136,8 @@ class FinancialDataset(Dataset):
     
     def __getitem__(self, idx):
         seq = self.sequences[idx]
-        seq = seq + torch.randn_like(seq) * 0.01  # Data augmentation
+        scale = torch.rand(1) * 0.2 + 0.9  # Random scaling 0.9-1.1
+        seq = seq * scale + torch.randn_like(seq) * 0.01
         return seq, self.conditions[idx]
 
 # Training function
@@ -150,12 +153,12 @@ def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
             with autocast('cuda'):
                 loss = diffusion.training_loss(model, sequences, t, cond)
             scaler.scale(loss).backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
             total_loss += loss.item()
-        scheduler.step()  # Update learning rate
+        scheduler.step()
         avg_loss = total_loss / len(train_loader)
         if (epoch + 1) % 5 == 0:
             print(f"Epoch {epoch+1}, Avg Loss: {avg_loss:.4f}")
@@ -165,7 +168,7 @@ def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
 def generate(model, diffusion, cond, device, seq_len, steps, method="ddim", eta=0.0):
     model.load_state_dict(torch.load(model_file))
     samples = diffusion.sample(model, cond, seq_len, steps, method, eta)
-    samples = samples * real_std + real_mean  # Denormalize
+    samples = samples * real_std + real_mean
     return samples
 
 # Main execution
@@ -189,7 +192,7 @@ if __name__ == "__main__":
     print(f"Generating samples with length {sequence_length}...")
     cond = torch.ones(10, sequence_length, device=device) * 0.2
     samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
-                       steps=50, method="ddim")  # DDIM with fewer steps
+                       steps=50, method="ddim")
     
     # Save generated samples
     samples_np = samples.cpu().numpy()
