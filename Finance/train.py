@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
-from torch.amp import GradScaler, autocast  # Updated AMP API
+from torch.amp import GradScaler, autocast
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -11,9 +11,9 @@ import os
 
 # Configuration
 sequence_length = 252  # Hard-coded (change to 63 for alternative)
-epochs = 10
+epochs = 20  # Increased for better convergence
 batch_size = 32
-num_timesteps = 200
+num_timesteps = 500  # Increased for finer diffusion
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 output_dir = "financial_outputs"
 model_file = os.path.join(output_dir, f"financial_diffusion_{sequence_length}.pth")
@@ -43,10 +43,10 @@ class FinancialDiffusionModel(nn.Module):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim, "sinusoidal")
         self.cond_embedding = nn.Linear(cond_dim, time_dim)
-        self.emb_proj = nn.Linear(time_dim, 64)  # Project emb to d_model
+        self.emb_proj = nn.Linear(time_dim, 64)
         self.input_proj = nn.Conv1d(1, 64, kernel_size=3, padding=1)
         self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=64, nhead=8, dim_feedforward=256, batch_first=True),  # Enable batch_first
+            nn.TransformerEncoderLayer(d_model=64, nhead=8, dim_feedforward=256, batch_first=True),
             num_layers=4)
         self.output = nn.Conv1d(64, 1, kernel_size=3, padding=1)
         self.dropout = nn.Dropout(0.1)
@@ -113,7 +113,7 @@ class FinancialDataset(Dataset):
 
 # Training function
 def train(model, diffusion, train_loader, optimizer, epochs, device):
-    scaler = GradScaler('cuda')  # Updated API
+    scaler = GradScaler('cuda')
     model.train()
     for epoch in range(epochs):
         total_loss = 0
@@ -121,7 +121,7 @@ def train(model, diffusion, train_loader, optimizer, epochs, device):
             sequences = sequences.to(device)
             cond = cond.to(device)
             t = torch.randint(0, diffusion.num_timesteps, (sequences.shape[0],), device=device)
-            with autocast('cuda'):  # Updated API
+            with autocast('cuda'):
                 loss = diffusion.training_loss(model, sequences, t, cond)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -156,7 +156,7 @@ if __name__ == "__main__":
     print(f"Generating samples with length {sequence_length}...")
     cond = torch.tensor([[0.2]], device=device).repeat(10, 1)
     samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
-                       steps=500, method="ddpm")
+                       steps=num_timesteps, method="ddpm")  # Match steps to num_timesteps
     
     # Save generated samples
     samples_np = samples.cpu().numpy()
