@@ -23,7 +23,6 @@ dates_cache = os.path.join(output_dir, "dates_cache.pkl")
 sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 sp500_tickers = pd.read_html(sp500_url)[0]["Symbol"].tolist()
 sp500_tickers = [ticker.replace(".", "-") for ticker in sp500_tickers]
-sp500_tickers = sp500_tickers[:100]  # Limit to 100 for stability (adjustable)
 
 def download_stock(ticker, retries=3):
     """Download stock data with retries."""

@@ -6,26 +6,28 @@ import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 import numpy as np
 import matplotlib.pyplot as plt
-from tqdm import tqdm
+from statsmodels.tsa.stattools import acf
 import os
 
 # Configuration
 sequence_length = 252  # Hard-coded (change to 63 for alternative)
-epochs = 30  # Increased for better convergence
+epochs = 50  # Increased for convergence
 batch_size = 32
-num_timesteps = 500
+num_timesteps = 200  # Reduced for faster sampling
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 output_dir = "financial_outputs"
 model_file = os.path.join(output_dir, f"financial_diffusion_{sequence_length}.pth")
 os.makedirs(output_dir, exist_ok=True)
 time_dim = 512
-cond_dim = sequence_length  # VIX sequence as condition
+cond_dim = sequence_length
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load dataset statistics
 data = torch.load(data_file, weights_only=False)
-seq_mean = data["sequences"].mean().item()
-seq_std = data["sequences"].std().item()
+real_mean = data["sequences"].mean(dim=1, keepdim=True)  # [n_sequences, 1]
+real_std = data["sequences"].std(dim=1, keepdim=True)  # [n_sequences, 1]
+real_mean = real_mean.mean().item()  # Average across sequences
+real_std = real_std.mean().item()
 
 # Time embedding module
 class TimeEmbedding(nn.Module):
@@ -47,8 +49,8 @@ class FinancialDiffusionModel(nn.Module):
     def __init__(self, time_dim=512, cond_dim=sequence_length):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim, "sinusoidal")
-        self.cond_embedding = nn.Conv1d(1, 64, kernel_size=3, padding=1)  # Process VIX sequence
-        self.emb_proj = nn.Linear(time_dim + 64, 64)  # Combine time and condition
+        self.cond_embedding = nn.Conv1d(1, 64, kernel_size=3, padding=1)
+        self.emb_proj = nn.Linear(time_dim + 64, 64)
         self.input_proj = nn.Conv1d(1, 64, kernel_size=3, padding=1)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=64, nhead=8, dim_feedforward=256, batch_first=True),
@@ -74,7 +76,7 @@ class FinancialDiffusionModel(nn.Module):
 
 # Diffusion process
 class Diffusion:
-    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.02):  # Increased beta_end
+    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.01):
         self.num_timesteps = num_timesteps
         self.betas = torch.linspace(beta_start, beta_end, num_timesteps).to(device)
         self.alphas = 1.0 - self.betas
@@ -94,7 +96,7 @@ class Diffusion:
         model.eval()
         with torch.no_grad():
             x = torch.randn(cond.shape[0], seq_len, device=cond.device)
-            for i in tqdm(range(steps - 1, -1, -1), desc="Sampling"):
+            for i in range(steps - 1, -1, -1):
                 t = torch.full((cond.shape[0],), i, device=cond.device, dtype=torch.long)
                 pred_noise = model(x, t, cond)
                 alpha = self.alphas[i]
@@ -109,7 +111,7 @@ class FinancialDataset(Dataset):
     def __init__(self, data_file):
         data = torch.load(data_file, weights_only=False)
         self.sequences = data["sequences"]
-        self.conditions = data["conditions"]  # [n_sequences, seq_len]
+        self.conditions = data["conditions"]
     
     def __len__(self):
         return len(self.sequences)
@@ -121,7 +123,7 @@ class FinancialDataset(Dataset):
 def train(model, diffusion, train_loader, optimizer, epochs, device):
     scaler = GradScaler('cuda')
     model.train()
-    for epoch in tqdm(range(epochs), desc="Training"):
+    for epoch in range(epochs):
         total_loss = 0
         for sequences, cond in train_loader:
             sequences = sequences.to(device)
@@ -143,7 +145,7 @@ def train(model, diffusion, train_loader, optimizer, epochs, device):
 def generate(model, diffusion, cond, device, seq_len, steps, method="ddpm", eta=0.0):
     model.load_state_dict(torch.load(model_file))
     samples = diffusion.sample(model, cond, seq_len, steps, method, eta)
-    samples = samples * seq_std + seq_mean  # Denormalize
+    samples = samples * real_std + real_mean  # Denormalize
     return samples
 
 # Main execution
@@ -160,10 +162,11 @@ if __name__ == "__main__":
     # Train
     print(f"Training with sequence length {sequence_length}...")
     train(model, diffusion, train_loader, optimizer, epochs, device)
+    print("Training completed.")
     
     # Generate samples
     print(f"Generating samples with length {sequence_length}...")
-    cond = torch.ones(10, sequence_length, device=device) * 0.2  # VIX sequence
+    cond = torch.ones(10, sequence_length, device=device) * 0.2
     samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
                        steps=num_timesteps, method="ddpm")
     
@@ -174,9 +177,34 @@ if __name__ == "__main__":
         plt.plot(samples_np[i], label=f"Sample {i+1}")
     plt.xlabel("Day")
     plt.ylabel("Return")
+    plt.ylim(-3 * real_std, 3 * real_std)  # Set Y-axis range
     plt.legend()
+    plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"generated_returns_{sequence_length}.png"))
     plt.close()
     torch.save(samples, os.path.join(output_dir, f"generated_returns_{sequence_length}.pt"))
     
+    # Evaluation metrics
+    print("Evaluation metrics:")
+    gen_mean = samples_np.mean()
+    gen_std = samples_np.std()
+    gen_acf = acf(samples_np[0], nlags=20)
+    real_acf = acf(data["sequences"][0].numpy(), nlags=20)
+    print(f"Generated Mean: {gen_mean:.6f}, Real Mean: {real_mean:.6f}")
+    print(f"Generated Std: {gen_std:.6f}, Real Std: {real_std:.6f}")
+    print(f"Generated ACF (lags 1-5): {gen_acf[1:6].tolist()}")
+    print(f"Real ACF (lags 1-5): {real_acf[1:6].tolist()}")
+    
+    # Save ACF plot
+    plt.figure(figsize=(8, 4))
+    plt.plot(gen_acf, label="Generated")
+    plt.plot(real_acf, label="Real")
+    plt.xlabel("Lag")
+    plt.ylabel("ACF")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"acf_comparison_{sequence_length}.png"))
+    plt.close()
+    
     print(f"Generated samples saved to {output_dir}/generated_returns_{sequence_length}.png")
+    print(f"ACF comparison saved to {output_dir}/acf_comparison_{sequence_length}.png")
