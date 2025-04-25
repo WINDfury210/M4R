@@ -62,7 +62,7 @@ class FinancialDiffusionModel(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=d_model, nhead=8, dim_feedforward=512, batch_first=True),
-            num_layers=8)
+            num_layers=10)  # Increased to 10 layers
         self.output = nn.Sequential(
             nn.Conv1d(d_model, d_model // 2, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -73,9 +73,14 @@ class FinancialDiffusionModel(nn.Module):
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)  # [batch, 1, seq_len]
         time_emb = self.time_embedding(t)  # [batch, time_dim]
-        cond_emb, _ = self.cond_embedding[0](cond.unsqueeze(-1))  # [batch, seq_len, cond_dim * 2]
+        # Ensure cond is [batch, seq_len, 1]
+        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond  # [batch, seq_len, 1]
+        cond_emb, _ = self.cond_embedding[0](cond)  # [batch, seq_len, cond_dim * 2]
         cond_emb = self.cond_embedding[1](cond_emb)  # [batch, seq_len, cond_dim]
+        cond_emb = self.cond_embedding[2](cond_emb)  # [batch, seq_len, cond_dim]
+        cond_res = cond_emb
         cond_emb, _ = self.cond_embedding[3]((cond_emb, cond_emb, cond_emb))  # [batch, seq_len, cond_dim]
+        cond_emb = cond_emb + cond_res  # Residual
         emb = self.emb_proj(time_emb).unsqueeze(1)  # [batch, 1, d_model]
         x = self.input_proj(x)  # [batch, d_model, seq_len]
         x = x.permute(0, 2, 1)  # [batch, seq_len, d_model]
@@ -83,7 +88,7 @@ class FinancialDiffusionModel(nn.Module):
         x = x + cond_emb  # [batch, seq_len, d_model]
         x_res = x
         x = self.transformer(x)
-        x = x + x_res  # Residual
+        x = x + x_res
         x = self.dropout(x)
         x = x.permute(0, 2, 1)  # [batch, d_model, seq_len]
         x = self.output(x).squeeze(1)  # [batch, seq_len]
@@ -196,8 +201,7 @@ if __name__ == "__main__":
     print(f"Generating samples with length {sequence_length}...")
     cond = torch.ones(10, sequence_length, device=device) * 0.2
     samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
-                       steps=100, method="ddim")
-    
+                       steps=150, method="ddim")  # Increased steps
     # Save generated samples
     samples_np = samples.cpu().numpy()
     plt.figure(figsize=(10, 5))
