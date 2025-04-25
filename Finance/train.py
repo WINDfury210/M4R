@@ -10,7 +10,7 @@ from statsmodels.tsa.stattools import acf
 import os
 
 # Configuration
-sequence_length = 252  # Hard-coded (change to 63 for alternative)
+sequence_length = 252
 epochs = 75
 batch_size = 32
 num_timesteps = 100
@@ -20,6 +20,7 @@ model_file = os.path.join(output_dir, f"financial_diffusion_{sequence_length}.pt
 os.makedirs(output_dir, exist_ok=True)
 time_dim = 512
 cond_dim = 64
+d_model = 128
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load dataset statistics
@@ -50,7 +51,8 @@ class FinancialDiffusionModel(nn.Module):
         self.cond_embedding = nn.Sequential(
             nn.GRU(input_size=1, hidden_size=cond_dim, num_layers=2, batch_first=True, bidirectional=True),
             nn.Linear(cond_dim * 2, cond_dim),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.MultiheadAttention(embed_dim=cond_dim, num_heads=8, batch_first=True),
         )
         self.emb_proj = nn.Linear(time_dim, d_model)
         self.input_proj = nn.Sequential(
@@ -71,15 +73,17 @@ class FinancialDiffusionModel(nn.Module):
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)  # [batch, 1, seq_len]
         time_emb = self.time_embedding(t)  # [batch, time_dim]
-        cond_emb, _ = self.cond_embedding(cond.unsqueeze(-1))  # [batch, seq_len, cond_dim]
+        cond_emb, _ = self.cond_embedding[0](cond.unsqueeze(-1))  # [batch, seq_len, cond_dim * 2]
+        cond_emb = self.cond_embedding[1](cond_emb)  # [batch, seq_len, cond_dim]
+        cond_emb, _ = self.cond_embedding[3]((cond_emb, cond_emb, cond_emb))  # [batch, seq_len, cond_dim]
         emb = self.emb_proj(time_emb).unsqueeze(1)  # [batch, 1, d_model]
         x = self.input_proj(x)  # [batch, d_model, seq_len]
         x = x.permute(0, 2, 1)  # [batch, seq_len, d_model]
-        x = x + emb  # Broadcast: [batch, seq_len, d_model]
+        x = x + emb  # Broadcast
         x = x + cond_emb  # [batch, seq_len, d_model]
         x_res = x
-        x = self.transformer(x)  # [batch, seq_len, d_model]
-        x = x + x_res  # Residual connection
+        x = self.transformer(x)
+        x = x + x_res  # Residual
         x = self.dropout(x)
         x = x.permute(0, 2, 1)  # [batch, d_model, seq_len]
         x = self.output(x).squeeze(1)  # [batch, seq_len]
@@ -136,7 +140,7 @@ class FinancialDataset(Dataset):
     
     def __getitem__(self, idx):
         seq = self.sequences[idx]
-        scale = torch.rand(1) * 0.2 + 0.9  # Random scaling 0.9-1.1
+        scale = torch.rand(1) * 0.2 + 0.9
         seq = seq * scale + torch.randn_like(seq) * 0.01
         return seq, self.conditions[idx]
 
@@ -178,7 +182,7 @@ if __name__ == "__main__":
                               shuffle=True, pin_memory=True)
     
     # Initialize model and diffusion
-    model = FinancialDiffusionModel(time_dim=time_dim, cond_dim=cond_dim, d_model=128).to(device)
+    model = FinancialDiffusionModel(time_dim=time_dim, cond_dim=cond_dim, d_model=d_model).to(device)
     diffusion = Diffusion(num_timesteps)
     optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
@@ -192,7 +196,7 @@ if __name__ == "__main__":
     print(f"Generating samples with length {sequence_length}...")
     cond = torch.ones(10, sequence_length, device=device) * 0.2
     samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
-                       steps=50, method="ddim")
+                       steps=100, method="ddim")
     
     # Save generated samples
     samples_np = samples.cpu().numpy()

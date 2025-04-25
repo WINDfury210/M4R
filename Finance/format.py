@@ -13,6 +13,10 @@ stride = 63
 sp500_data = torch.load(os.path.join(data_dir, "sp500_returns.pt"), weights_only=False)
 vix_data = torch.load(os.path.join(data_dir, "vix.pt"), weights_only=False)
 
+# Handle dictionary structure
+sp500_data = sp500_data["returns"] if isinstance(sp500_data, dict) else sp500_data
+vix_data = vix_data["vix"] if isinstance(vix_data, dict) else vix_data
+
 # Format sequences
 for seq_len in sequence_lengths:
     sequences = []
@@ -22,14 +26,14 @@ for seq_len in sequence_lengths:
         stock_data = sp500_data[stock_idx]
         for start in range(0, n_days - seq_len + 1, stride):
             sequence = stock_data[start:start + seq_len]
-            vix_sequence = vix_data[start:start + seq_len]  # VIX sequence
+            vix_sequence = vix_data[start:start + seq_len]
             if sequence.shape[0] == seq_len and vix_sequence.shape[0] == seq_len:
                 sequences.append(sequence)
                 conditions.append(vix_sequence)
     
     # Save sequences
-    sequences = torch.stack(sequences)  # [n_sequences, seq_len]
-    conditions = torch.stack(conditions)  # [n_sequences, seq_len]
+    sequences = torch.stack(sequences)
+    conditions = torch.stack(conditions)
     output_file = os.path.join(output_dir, f"sequences_{seq_len}.pt")
     torch.save({"sequences": sequences, "conditions": conditions}, output_file)
     print(f"Saved {sequences.shape[0]} sequences of length {seq_len} to {output_file}")
