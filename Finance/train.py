@@ -45,14 +45,15 @@ class TimeEmbedding(nn.Module):
 
 # Condition embedding module
 class ConditionEmbedding(nn.Module):
-    def __init__(self, cond_dim):
+    def __init__(self, cond_dim, d_model):
         super().__init__()
         self.gru = nn.GRU(input_size=1, hidden_size=cond_dim, num_layers=2, 
                          batch_first=True, bidirectional=True)
         self.linear = nn.Linear(cond_dim * 2, cond_dim)
+        self.proj = nn.Linear(cond_dim, d_model)  # Project to d_model
         self.relu = nn.ReLU()
-        self.norm = nn.LayerNorm(cond_dim)
-        self.attention = nn.MultiheadAttention(embed_dim=cond_dim, num_heads=8, 
+        self.norm = nn.LayerNorm(d_model)
+        self.attention = nn.MultiheadAttention(embed_dim=d_model, num_heads=8, 
                                              batch_first=True)
     
     def forward(self, cond):
@@ -60,9 +61,10 @@ class ConditionEmbedding(nn.Module):
         cond_emb, _ = self.gru(cond)  # [batch, seq_len, cond_dim * 2]
         cond_emb = self.linear(cond_emb)  # [batch, seq_len, cond_dim]
         cond_emb = self.relu(cond_emb)
+        cond_emb = self.proj(cond_emb)  # [batch, seq_len, d_model]
         cond_emb = self.norm(cond_emb)
         cond_res = cond_emb
-        cond_emb, _ = self.attention(cond_emb, cond_emb, cond_emb)  # [batch, seq_len, cond_dim]
+        cond_emb, _ = self.attention(cond_emb, cond_emb, cond_emb)  # [batch, seq_len, d_model]
         cond_emb = cond_emb + cond_res  # Residual
         return cond_emb
 
@@ -71,7 +73,7 @@ class FinancialDiffusionModel(nn.Module):
     def __init__(self, time_dim=512, cond_dim=64, d_model=256):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim)
-        self.cond_embedding = ConditionEmbedding(cond_dim)
+        self.cond_embedding = ConditionEmbedding(cond_dim, d_model)
         self.emb_proj = nn.Linear(time_dim, d_model)
         self.input_proj = nn.Sequential(
             nn.Conv1d(1, d_model, kernel_size=3, padding=1),
@@ -92,19 +94,17 @@ class FinancialDiffusionModel(nn.Module):
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)  # [batch, 1, seq_len]
         time_emb = self.time_embedding(t)  # [batch, time_dim]
-        cond_emb = self.cond_embedding(cond)  # [batch, seq_len, cond_dim]
+        cond_emb = self.cond_embedding(cond)  # [batch, seq_len, d_model]
         emb = self.emb_proj(time_emb).unsqueeze(1)  # [batch, 1, d_model]
         x = self.input_proj[0](x)  # Conv1d: [batch, d_model, seq_len]
         x = self.input_proj[1](x)  # ReLU
         x = x.permute(0, 2, 1)    # [batch, seq_len, d_model]
         x = self.input_proj[2](x)  # LayerNorm
         x = x.permute(0, 2, 1)    # [batch, d_model, seq_len]
-        x = x.permute(0, 2, 1)  # [batch, seq_len, d_model]
+        x = x.permute(0, 2, 1)    # [batch, seq_len, d_model]
         x = x + emb  # Broadcast
         x = x + cond_emb  # [batch, seq_len, d_model]
-        x_res = x
         x = self.transformer(x)
-        x = x + x_res
         x = self.dropout(x)
         x = x.permute(0, 2, 1)  # [batch, d_model, seq_len]
         x = self.output(x).squeeze(1)  # [batch, seq_len]
