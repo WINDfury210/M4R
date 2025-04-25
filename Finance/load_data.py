@@ -17,6 +17,7 @@ os.makedirs(output_dir, exist_ok=True)
 output_file = os.path.join(output_dir, "sp500_returns.pt")
 vix_file = os.path.join(output_dir, "vix.pt")
 cache_file = os.path.join(output_dir, "stock_data_cache.pkl")
+dates_cache = os.path.join(output_dir, "dates_cache.pkl")
 
 # Fetch S&P 500 tickers
 sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -50,9 +51,9 @@ def download_stock(ticker, retries=3):
 
 # Load or download VIX
 print("Downloading VIX data...")
-if os.path.exists(vix_file):
-    vix_tensor = torch.load(vix_file)
-    dates = torch.load(output_file)["dates"]  # Reuse dates
+if os.path.exists(dates_cache):
+    dates = pickle.load(open(dates_cache, "rb"))
+    vix_tensor = torch.load(vix_file, weights_only=False)
     print("Loaded cached VIX data")
 else:
     vix_data = yf.download("^VIX", start=start_date, end=end_date, progress=False, auto_adjust=False)
@@ -61,6 +62,8 @@ else:
     vix = vix_data["Close"].values
     dates = vix_data.index
     vix_tensor = torch.tensor((vix[1:] - vix[1:].mean()) / vix[1:].std(), dtype=torch.float32)
+    with open(dates_cache, "wb") as f:
+        pickle.dump(dates, f)
 
 n_days = len(dates)
 
@@ -73,7 +76,7 @@ if os.path.exists(cache_file):
     failed_tickers = [t for t in sp500_tickers if t not in stock_data]
 else:
     print("Downloading stock data...")
-    with ThreadPoolExecutor(max_workers=2) as executor:  # Reduce concurrency
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {executor.submit(download_stock, ticker): ticker for ticker in sp500_tickers}
         for future in tqdm(as_completed(futures), total=len(sp500_tickers), desc="Stocks"):
             ticker, closes = future.result()
