@@ -17,9 +17,9 @@ model_file = f"financial_outputs/financial_diffusion_{sequence_length}.pth"
 output_dir = "financial_outputs"
 metrics_file = os.path.join(output_dir, f"metrics_{sequence_length}.txt")
 os.makedirs(output_dir, exist_ok=True)
-time_dim = 512
-cond_dim = 64
-d_model = 256
+time_dim = 128
+cond_dim = 16
+d_model = 64
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load dataset
@@ -30,80 +30,64 @@ print(f"Loaded sequences shape: {data['sequences'].shape}")
 
 # Time embedding module
 class TimeEmbedding(nn.Module):
-    def __init__(self, dim, type="sinusoidal"):
+    def __init__(self, dim):
         super().__init__()
         self.dim = dim
-        self.type = type
     
     def forward(self, t):
-        if self.type == "sinusoidal":
-            half_dim = self.dim // 2
-            emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
-            emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
-            emb = t[:, None] * emb[None, :]
-            return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+        half_dim = self.dim // 2
+        emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
+        emb = t[:, None] * emb[None, :]
+        return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
 
 # Condition embedding module
 class ConditionEmbedding(nn.Module):
     def __init__(self, cond_dim, d_model):
         super().__init__()
-        self.gru = nn.GRU(input_size=1, hidden_size=cond_dim, num_layers=2, 
-                         batch_first=True, bidirectional=True)
-        self.linear = nn.Linear(cond_dim * 2, cond_dim)
+        self.linear = nn.Linear(1, cond_dim)
         self.proj = nn.Linear(cond_dim, d_model)
         self.relu = nn.ReLU()
         self.norm = nn.LayerNorm(d_model)
-        self.attention = nn.MultiheadAttention(embed_dim=d_model, num_heads=8, 
-                                             batch_first=True)
     
     def forward(self, cond):
-        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond
-        cond_emb, _ = self.gru(cond)
-        cond_emb = self.linear(cond_emb)
+        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond  # [batch, seq_len, 1]
+        cond_emb = self.linear(cond)  # [batch, seq_len, cond_dim]
         cond_emb = self.relu(cond_emb)
-        cond_emb = self.proj(cond_emb)
+        cond_emb = self.proj(cond_emb)  # [batch, seq_len, d_model]
         cond_emb = self.norm(cond_emb)
-        cond_res = cond_emb
-        cond_emb, _ = self.attention(cond_emb, cond_emb, cond_emb)
-        cond_emb = cond_emb + cond_res
         return cond_emb
 
 # Financial diffusion model
 class FinancialDiffusionModel(nn.Module):
-    def __init__(self, time_dim=512, cond_dim=64, d_model=256):
+    def __init__(self, time_dim=128, cond_dim=16, d_model=64):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim)
         self.cond_embedding = ConditionEmbedding(cond_dim, d_model)
         self.emb_proj = nn.Linear(time_dim, d_model)
         self.input_proj = nn.Sequential(
-            nn.Conv1d(1, d_model, kernel_size=3, padding=1),
+            nn.Linear(1, d_model),
             nn.ReLU(),
             nn.LayerNorm(d_model)
         )
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=d_model, nhead=8, 
-                                     dim_feedforward=1024, batch_first=True),
-            num_layers=10)
-        self.output = nn.Sequential(
-            nn.Conv1d(d_model, d_model // 2, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(d_model // 2, 1, kernel_size=3, padding=1)
-        )
+                                     dim_feedforward=256, batch_first=True),
+            num_layers=4)
+        self.output = nn.Linear(d_model, 1)
         self.dropout = nn.Dropout(0.1)
     
     def forward(self, x, t, cond):
-        x = x.unsqueeze(1)
-        time_emb = self.time_embedding(t)
-        cond_emb = self.cond_embedding(cond)
-        emb = self.emb_proj(time_emb).unsqueeze(1)
-        x = self.input_proj(x)
-        x = x.permute(0, 2, 1)
+        x = x.unsqueeze(-1)  # [batch, seq_len, 1]
+        time_emb = self.time_embedding(t)  # [batch, time_dim]
+        cond_emb = self.cond_embedding(cond)  # [batch, seq_len, d_model]
+        emb = self.emb_proj(time_emb).unsqueeze(1)  # [batch, 1, d_model]
+        x = self.input_proj(x)  # [batch, seq_len, d_model]
         x = x + emb
         x = x + cond_emb
         x = self.transformer(x)
         x = self.dropout(x)
-        x = x.permute(0, 2, 1)
-        x = self.output(x).squeeze(1)
+        x = self.output(x).squeeze(-1)  # [batch, seq_len]
         return x
 
 # Diffusion process (DDIM)
@@ -150,7 +134,7 @@ def energy_distance(x, y):
 
 # Generate samples
 def generate_samples(model, diffusion, cond, seq_len, steps, method="ddim", eta=0.0):
-    model.load_state_dict(torch.load(model_file))
+    model.load_state_dict(torch.load(model_file, map_location=device))
     samples = diffusion.sample(model, cond, seq_len, steps, method, eta)
     samples = samples * real_std + real_mean
     return samples
