@@ -24,7 +24,7 @@ os.makedirs(output_dir, exist_ok=True)
 class FinancialDataset(Dataset):
     def __init__(self, data_file):
         data = torch.load(data_file, weights_only=False)
-        self.sequences = data["sequences"].float()  # [N, 252, 1]
+        self.sequences = data["sequences"].float()  # [N, 252]
         self.conditions = data["conditions"].float()  # [N, 252]
     
     def __len__(self):
@@ -97,7 +97,7 @@ class FinancialDiffusionModel(nn.Module):
         self.dropout = nn.Dropout(0.1)
     
     def forward(self, x, t, cond):
-        x = x.unsqueeze(1) if x.dim() == 2 else x  # [batch, seq_len, 1]
+        x = x.unsqueeze(1)  # [batch, 1, seq_len]
         time_emb = self.time_embedding(t)
         cond_emb = self.cond_embedding(cond)
         emb = self.emb_proj(time_emb).unsqueeze(1)
@@ -127,14 +127,14 @@ class Diffusion:
     
     def training_loss(self, model, x0, t, cond):
         noise = torch.randn_like(x0)
-        xt = self.sqrt_alpha_bars[t][:, None, None] * x0 + self.sqrt_one_minus_alpha_bars[t][:, None, None] * noise
+        xt = self.sqrt_alpha_bars[t][:, None] * x0 + self.sqrt_one_minus_alpha_bars[t][:, None] * noise
         predicted_noise = model(xt, t, cond)
         return F.mse_loss(predicted_noise, noise)
     
     def sample(self, model, cond, seq_len, steps, method="ddim", eta=0.0):
         model.eval()
         with torch.no_grad():
-            x = torch.randn(cond.shape[0], seq_len, 1, device=cond.device)
+            x = torch.randn(cond.shape[0], seq_len, device=cond.device)
             steps = min(steps, self.num_timesteps)
             skip = max(1, self.num_timesteps // steps)
             timesteps = torch.arange(self.num_timesteps - 1, -1, -skip, device=device)

@@ -16,7 +16,7 @@ os.makedirs(output_dir, exist_ok=True)
 
 # Load S&P 500 tickers
 sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist() # Fix ticker format, increase to 200
+tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()[:200]
 
 # Download data
 sequences = []
@@ -46,7 +46,7 @@ for ticker in tickers:
 if failed_tickers:
     print(f"Failed tickers ({len(failed_tickers)}): {failed_tickers}")
 
-# Convert to numpy array first
+# Convert to numpy array
 sequences = np.array(sequences)
 conditions = np.array(conditions)
 
@@ -56,8 +56,8 @@ conditions = torch.tensor(conditions, dtype=torch.float32)
 
 # Standardize per sequence
 sequences = (sequences - sequences.mean(dim=1, keepdim=True)) / (sequences.std(dim=1, keepdim=True) + 1e-8)
-sequences = sequences * 0.015  # Scale to typical std
-conditions = (conditions - conditions.mean()) / (conditions.std() + 1e-8)  # Normalize VIX
+sequences = sequences * 0.015
+conditions = (conditions - conditions.mean()) / (conditions.std() + 1e-8)
 
 # Save
 output_file = f"{output_dir}/sequences_{sequence_length}.pt"
