@@ -17,6 +17,7 @@ num_timesteps = 100
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 output_dir = "financial_outputs"
 model_file = os.path.join(output_dir, f"financial_diffusion_{sequence_length}.pth")
+loss_file = os.path.join(output_dir, f"losses_{sequence_length}.txt")
 os.makedirs(output_dir, exist_ok=True)
 time_dim = 512
 cond_dim = 64
@@ -50,7 +51,7 @@ class ConditionEmbedding(nn.Module):
         self.gru = nn.GRU(input_size=1, hidden_size=cond_dim, num_layers=2, 
                          batch_first=True, bidirectional=True)
         self.linear = nn.Linear(cond_dim * 2, cond_dim)
-        self.proj = nn.Linear(cond_dim, d_model)  # Project to d_model
+        self.proj = nn.Linear(cond_dim, d_model)
         self.relu = nn.ReLU()
         self.norm = nn.LayerNorm(d_model)
         self.attention = nn.MultiheadAttention(embed_dim=d_model, num_heads=8, 
@@ -132,7 +133,8 @@ class Diffusion:
         model.eval()
         with torch.no_grad():
             x = torch.randn(cond.shape[0], seq_len, device=cond.device)
-            skip = self.num_timesteps // steps
+            steps = min(steps, self.num_timesteps)  # Ensure steps <= num_timesteps
+            skip = max(1, self.num_timesteps // steps)  # Avoid zero step
             timesteps = torch.arange(self.num_timesteps - 1, -1, -skip, device=device)
             for i, t_idx in enumerate(timesteps):
                 t = torch.full((cond.shape[0],), t_idx, device=cond.device, dtype=torch.long)
@@ -169,6 +171,7 @@ class FinancialDataset(Dataset):
 def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
     scaler = GradScaler('cuda')
     model.train()
+    losses = []
     for epoch in range(epochs):
         total_loss = 0
         for sequences, cond in train_loader:
@@ -185,9 +188,13 @@ def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
             total_loss += loss.item()
         scheduler.step()
         avg_loss = total_loss / len(train_loader)
-        if (epoch + 1) % 5 == 0:
-            print(f"Epoch {epoch+1}, Avg Loss: {avg_loss:.4f}")
-        torch.save(model.state_dict(), model_file)
+        losses.append(avg_loss)
+        print(f"Epoch {epoch+1}, Avg Loss: {avg_loss:.4f}")
+    # Save losses to file
+    with open(loss_file, 'w') as f:
+        for epoch, loss in enumerate(losses, 1):
+            f.write(f"Epoch {epoch}, Avg Loss: {loss:.4f}\n")
+    return losses
 
 # Generation function
 def generate(model, diffusion, cond, device, seq_len, steps, method="ddim", eta=0.0):
@@ -210,14 +217,17 @@ if __name__ == "__main__":
     
     # Train
     print(f"Training with sequence length {sequence_length}...")
-    train(model, diffusion, train_loader, optimizer, scheduler, epochs, device)
+    losses = train(model, diffusion, train_loader, optimizer, scheduler, epochs, device)
     print("Training completed.")
+    print("All epoch losses:")
+    for epoch, loss in enumerate(losses, 1):
+        print(f"Epoch {epoch}, Avg Loss: {loss:.4f}")
     
     # Generate samples
     print(f"Generating samples with length {sequence_length}...")
     cond = torch.ones(10, sequence_length, device=device) * 0.2
     samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
-                       steps=200, method="ddim")
+                       steps=100, method="ddim")  # Reduced steps
     
     # Save generated samples
     samples_np = samples.cpu().numpy()
