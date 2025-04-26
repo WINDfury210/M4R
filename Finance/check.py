@@ -11,15 +11,15 @@ import os
 # Configuration
 sequence_length = 252
 num_samples = 10
-steps = 200
+steps = 500
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 model_file = f"financial_outputs/financial_diffusion_{sequence_length}.pth"
 output_dir = "financial_outputs"
 metrics_file = os.path.join(output_dir, f"metrics_{sequence_length}.txt")
 os.makedirs(output_dir, exist_ok=True)
-time_dim = 128
-cond_dim = 16
-d_model = 64
+time_dim = 512
+cond_dim = 64
+d_model = 256
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load dataset
@@ -45,37 +45,35 @@ class TimeEmbedding(nn.Module):
 class ConditionEmbedding(nn.Module):
     def __init__(self, cond_dim, d_model):
         super().__init__()
-        self.linear = nn.Linear(1, cond_dim)
+        self.gru = nn.GRU(1, cond_dim, num_layers=2, batch_first=True)
         self.proj = nn.Linear(cond_dim, d_model)
+        self.cond_attn = nn.MultiheadAttention(d_model, num_heads=8, batch_first=True)
         self.relu = nn.ReLU()
         self.norm = nn.LayerNorm(d_model)
     
     def forward(self, cond):
-        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond  # [batch, seq_len, 1]
-        cond_emb = self.linear(cond)  # [batch, seq_len, cond_dim]
+        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond
+        cond_emb, _ = self.gru(cond)
+        cond_emb = self.proj(cond_emb)
         cond_emb = self.relu(cond_emb)
-        cond_emb = self.proj(cond_emb)  # [batch, seq_len, d_model]
+        cond_emb, _ = self.cond_attn(cond_emb, cond_emb, cond_emb)
         cond_emb = self.norm(cond_emb)
         return cond_emb
 
 # Financial diffusion model
 class FinancialDiffusionModel(nn.Module):
-    def __init__(self, time_dim=128, cond_dim=16, d_model=64):
+    def __init__(self, time_dim=512, cond_dim=64, d_model=256):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim)
         self.cond_embedding = ConditionEmbedding(cond_dim, d_model)
+        self.input_proj = nn.Linear(1, d_model)
         self.emb_proj = nn.Linear(time_dim, d_model)
-        self.input_proj = nn.Sequential(
-            nn.Linear(1, d_model),
-            nn.ReLU(),
-            nn.LayerNorm(d_model)
-        )
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=d_model, nhead=8, 
-                                     dim_feedforward=256, batch_first=True),
-            num_layers=4)
+                                     dim_feedforward=1024, batch_first=True),
+            num_layers=8)
         self.output = nn.Linear(d_model, 1)
-        self.dropout = nn.Dropout(0.1)
+        self.norm = nn.LayerNorm(d_model)
     
     def forward(self, x, t, cond):
         x = x.unsqueeze(-1)  # [batch, seq_len, 1]
@@ -86,21 +84,22 @@ class FinancialDiffusionModel(nn.Module):
         x = x + emb
         x = x + cond_emb
         x = self.transformer(x)
-        x = self.dropout(x)
+        x = self.norm(x)
         x = self.output(x).squeeze(-1)  # [batch, seq_len]
         return x
 
-# Diffusion process (DDIM)
+# Diffusion process
 class Diffusion:
-    def __init__(self, num_timesteps=100, beta_start=0.00005, beta_end=0.001):
+    def __init__(self, num_timesteps=200, beta_start=0.00005, beta_end=0.005):
         self.num_timesteps = num_timesteps
-        self.betas = torch.linspace(beta_start, beta_end, num_timesteps).to(device)
+        self.betas = torch.cos(torch.linspace(0, np.pi/2, num_timesteps)) * (beta_end - beta_start) + beta_start
+        self.betas = self.betas.to(device)
         self.alphas = 1.0 - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - self.alpha_bars)
     
-    def sample(self, model, cond, seq_len, steps, method="ddim", eta=0.0):
+    def sample(self, model, cond, seq_len, steps, method="ddim", eta=0.1):
         model.eval()
         with torch.no_grad():
             x = torch.randn(cond.shape[0], seq_len, device=cond.device)
@@ -133,7 +132,7 @@ def energy_distance(x, y):
     return np.sqrt(2 * xy - xx - yy)
 
 # Generate samples
-def generate_samples(model, diffusion, cond, seq_len, steps, method="ddim", eta=0.0):
+def generate_samples(model, diffusion, cond, seq_len, steps, method="ddim", eta=0.1):
     model.load_state_dict(torch.load(model_file, map_location=device))
     samples = diffusion.sample(model, cond, seq_len, steps, method, eta)
     samples = samples * real_std + real_mean
@@ -241,7 +240,7 @@ def save_metrics(metrics, file_path):
 if __name__ == "__main__":
     # Initialize model and diffusion
     model = FinancialDiffusionModel(time_dim=time_dim, cond_dim=cond_dim, d_model=d_model).to(device)
-    diffusion = Diffusion(num_timesteps=100)
+    diffusion = Diffusion(num_timesteps=200)
     
     # Generate samples
     print(f"Generating {num_samples} samples with length {sequence_length}...")
@@ -255,7 +254,7 @@ if __name__ == "__main__":
         plt.plot(samples_np[i], label=f"Sample {i+1}")
     plt.xlabel("Day")
     plt.ylabel("Return")
-    plt.ylim(-0.05, 0.05)
+    plt.ylim(-0.15, 0.15)
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"generated_returns_{sequence_length}.png"))

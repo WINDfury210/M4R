@@ -16,7 +16,7 @@ os.makedirs(output_dir, exist_ok=True)
 
 # Load S&P 500 tickers
 sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()[:200]
+tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()
 
 # Download data
 sequences = []

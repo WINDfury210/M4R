@@ -10,11 +10,11 @@ import matplotlib.pyplot as plt
 # Configuration
 sequence_length = 252
 batch_size = 32
-epochs = 100
-lr = 1e-4
-time_dim = 128
-cond_dim = 16
-d_model = 64
+epochs = 200
+lr = 2e-5
+time_dim = 512
+cond_dim = 64
+d_model = 256
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 output_dir = "financial_outputs"
@@ -51,37 +51,35 @@ class TimeEmbedding(nn.Module):
 class ConditionEmbedding(nn.Module):
     def __init__(self, cond_dim, d_model):
         super().__init__()
-        self.linear = nn.Linear(1, cond_dim)
+        self.gru = nn.GRU(1, cond_dim, num_layers=2, batch_first=True)
         self.proj = nn.Linear(cond_dim, d_model)
+        self.cond_attn = nn.MultiheadAttention(d_model, num_heads=8, batch_first=True)
         self.relu = nn.ReLU()
         self.norm = nn.LayerNorm(d_model)
     
     def forward(self, cond):
-        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond  # [batch, seq_len, 1]
-        cond_emb = self.linear(cond)  # [batch, seq_len, cond_dim]
+        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond
+        cond_emb, _ = self.gru(cond)
+        cond_emb = self.proj(cond_emb)
         cond_emb = self.relu(cond_emb)
-        cond_emb = self.proj(cond_emb)  # [batch, seq_len, d_model]
+        cond_emb, _ = self.cond_attn(cond_emb, cond_emb, cond_emb)
         cond_emb = self.norm(cond_emb)
         return cond_emb
 
 # Financial diffusion model
 class FinancialDiffusionModel(nn.Module):
-    def __init__(self, time_dim=128, cond_dim=16, d_model=64):
+    def __init__(self, time_dim=512, cond_dim=64, d_model=256):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim)
         self.cond_embedding = ConditionEmbedding(cond_dim, d_model)
+        self.input_proj = nn.Linear(1, d_model)
         self.emb_proj = nn.Linear(time_dim, d_model)
-        self.input_proj = nn.Sequential(
-            nn.Linear(1, d_model),
-            nn.ReLU(),
-            nn.LayerNorm(d_model)
-        )
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=d_model, nhead=8, 
-                                     dim_feedforward=256, batch_first=True),
-            num_layers=4)
+                                     dim_feedforward=1024, batch_first=True),
+            num_layers=8)
         self.output = nn.Linear(d_model, 1)
-        self.dropout = nn.Dropout(0.1)
+        self.norm = nn.LayerNorm(d_model)
     
     def forward(self, x, t, cond):
         x = x.unsqueeze(-1)  # [batch, seq_len, 1]
@@ -92,15 +90,16 @@ class FinancialDiffusionModel(nn.Module):
         x = x + emb
         x = x + cond_emb
         x = self.transformer(x)
-        x = self.dropout(x)
+        x = self.norm(x)
         x = self.output(x).squeeze(-1)  # [batch, seq_len]
         return x
 
 # Diffusion process
 class Diffusion:
-    def __init__(self, num_timesteps=100, beta_start=0.00005, beta_end=0.001):
+    def __init__(self, num_timesteps=200, beta_start=0.00005, beta_end=0.005):
         self.num_timesteps = num_timesteps
-        self.betas = torch.linspace(beta_start, beta_end, num_timesteps).to(device)
+        self.betas = torch.cos(torch.linspace(0, np.pi/2, num_timesteps)) * (beta_end - beta_start) + beta_start
+        self.betas = self.betas.to(device)
         self.alphas = 1.0 - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
@@ -110,9 +109,13 @@ class Diffusion:
         noise = torch.randn_like(x0)  # [batch, seq_len]
         xt = self.sqrt_alpha_bars[t][:, None] * x0 + self.sqrt_one_minus_alpha_bars[t][:, None] * noise
         predicted_noise = model(xt, t, cond)
-        return F.mse_loss(predicted_noise, noise)
+        mse_loss = F.mse_loss(predicted_noise, noise)
+        # Encourage negative skew and heavy tails
+        skew_penalty = torch.mean(torch.relu(predicted_noise)) * 0.01
+        kurt_penalty = -torch.mean(predicted_noise**4) * 0.001
+        return mse_loss + skew_penalty + kurt_penalty
     
-    def sample(self, model, cond, seq_len, steps, method="ddim", eta=0.0):
+    def sample(self, model, cond, seq_len, steps, method="ddim", eta=0.1):
         model.eval()
         with torch.no_grad():
             x = torch.randn(cond.shape[0], seq_len, device=cond.device)
@@ -146,6 +149,7 @@ def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
             t = torch.randint(0, diffusion.num_timesteps, (sequences.shape[0],), device=device)
             loss = diffusion.training_loss(model, sequences, t, cond)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             epoch_loss += loss.item()
             if batch_idx % 100 == 0:
@@ -164,8 +168,8 @@ if __name__ == "__main__":
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     
     model = FinancialDiffusionModel(time_dim=time_dim, cond_dim=cond_dim, d_model=d_model).to(device)
-    diffusion = Diffusion(num_timesteps=100)
-    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    diffusion = Diffusion(num_timesteps=200)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     
     losses = train(model, diffusion, train_loader, optimizer, scheduler, epochs, device)
