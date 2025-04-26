@@ -12,9 +12,9 @@ sequence_length = 252
 batch_size = 32
 epochs = 100
 lr = 1e-4
-time_dim = 256
-cond_dim = 32
-d_model = 128
+time_dim = 128
+cond_dim = 16
+d_model = 64
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 output_dir = "financial_outputs"
@@ -51,45 +51,44 @@ class TimeEmbedding(nn.Module):
 class ConditionEmbedding(nn.Module):
     def __init__(self, cond_dim, d_model):
         super().__init__()
-        self.gru = nn.GRU(input_size=1, hidden_size=cond_dim, num_layers=1, batch_first=True)
-        self.linear = nn.Linear(cond_dim, d_model)
+        self.linear = nn.Linear(1, cond_dim)
+        self.proj = nn.Linear(cond_dim, d_model)
         self.relu = nn.ReLU()
         self.norm = nn.LayerNorm(d_model)
     
     def forward(self, cond):
-        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond
-        cond_emb, _ = self.gru(cond)
-        cond_emb = self.linear(cond_emb)
+        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond  # [batch, seq_len, 1]
+        cond_emb = self.linear(cond)  # [batch, seq_len, cond_dim]
         cond_emb = self.relu(cond_emb)
+        cond_emb = self.proj(cond_emb)  # [batch, seq_len, d_model]
         cond_emb = self.norm(cond_emb)
         return cond_emb
 
 # Financial diffusion model
 class FinancialDiffusionModel(nn.Module):
-    def __init__(self, time_dim=256, cond_dim=32, d_model=128):
+    def __init__(self, time_dim=128, cond_dim=16, d_model=64):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim)
         self.cond_embedding = ConditionEmbedding(cond_dim, d_model)
         self.emb_proj = nn.Linear(time_dim, d_model)
         self.input_proj = nn.Sequential(
-            nn.Conv1d(1, d_model, kernel_size=3, padding=1),
+            nn.Linear(1, d_model),
             nn.ReLU(),
             nn.LayerNorm(d_model)
         )
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=d_model, nhead=8, 
-                                     dim_feedforward=512, batch_first=True),
-            num_layers=6)
+                                     dim_feedforward=256, batch_first=True),
+            num_layers=4)
         self.output = nn.Linear(d_model, 1)
         self.dropout = nn.Dropout(0.1)
     
     def forward(self, x, t, cond):
-        x = x.unsqueeze(1)  # [batch, 1, seq_len]
+        x = x.unsqueeze(-1)  # [batch, seq_len, 1]
         time_emb = self.time_embedding(t)  # [batch, time_dim]
         cond_emb = self.cond_embedding(cond)  # [batch, seq_len, d_model]
         emb = self.emb_proj(time_emb).unsqueeze(1)  # [batch, 1, d_model]
-        x = self.input_proj(x)  # [batch, d_model, seq_len]
-        x = x.permute(0, 2, 1)  # [batch, seq_len, d_model]
+        x = self.input_proj(x)  # [batch, seq_len, d_model]
         x = x + emb
         x = x + cond_emb
         x = self.transformer(x)
