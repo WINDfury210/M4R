@@ -26,6 +26,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 data = torch.load(data_file, weights_only=False)
 real_mean = data["sequences"].mean().item()
 real_std = data["sequences"].std().item()
+print(f"Loaded sequences shape: {data['sequences'].shape}")
 
 # Time embedding module
 class TimeEmbedding(nn.Module):
@@ -95,11 +96,7 @@ class FinancialDiffusionModel(nn.Module):
         time_emb = self.time_embedding(t)
         cond_emb = self.cond_embedding(cond)
         emb = self.emb_proj(time_emb).unsqueeze(1)
-        x = self.input_proj[0](x)
-        x = self.input_proj[1](x)
-        x = x.permute(0, 2, 1)
-        x = self.input_proj[2](x)
-        x = x.permute(0, 2, 1)
+        x = self.input_proj(x)
         x = x.permute(0, 2, 1)
         x = x + emb
         x = x + cond_emb

@@ -26,6 +26,7 @@ class FinancialDataset(Dataset):
         data = torch.load(data_file, weights_only=False)
         self.sequences = data["sequences"].float()  # [N, 252]
         self.conditions = data["conditions"].float()  # [N, 252]
+        print(f"Loaded sequences shape: {self.sequences.shape}")
     
     def __len__(self):
         return len(self.sequences)
@@ -101,11 +102,7 @@ class FinancialDiffusionModel(nn.Module):
         time_emb = self.time_embedding(t)
         cond_emb = self.cond_embedding(cond)
         emb = self.emb_proj(time_emb).unsqueeze(1)
-        x = self.input_proj[0](x)
-        x = self.input_proj[1](x)
-        x = x.permute(0, 2, 1)
-        x = self.input_proj[2](x)
-        x = x.permute(0, 2, 1)
+        x = self.input_proj(x)
         x = x.permute(0, 2, 1)
         x = x + emb
         x = x + cond_emb
@@ -126,7 +123,7 @@ class Diffusion:
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - self.alpha_bars)
     
     def training_loss(self, model, x0, t, cond):
-        noise = torch.randn_like(x0)
+        noise = torch.randn_like(x0)  # [batch, seq_len]
         xt = self.sqrt_alpha_bars[t][:, None] * x0 + self.sqrt_one_minus_alpha_bars[t][:, None] * noise
         predicted_noise = model(xt, t, cond)
         return F.mse_loss(predicted_noise, noise)

@@ -47,17 +47,30 @@ if failed_tickers:
     print(f"Failed tickers ({len(failed_tickers)}): {failed_tickers}")
 
 # Convert to numpy array
-sequences = np.array(sequences)
-conditions = np.array(conditions)
+sequences = np.array(sequences)  # [N, 252]
+conditions = np.array(conditions)  # [N, 252]
+
+# Debug shapes
+print(f"Sequences numpy shape: {sequences.shape}")
+print(f"Conditions numpy shape: {conditions.shape}")
 
 # Convert to tensor
-sequences = torch.tensor(sequences, dtype=torch.float32)
-conditions = torch.tensor(conditions, dtype=torch.float32)
+sequences = torch.tensor(sequences, dtype=torch.float32)  # [N, 252]
+conditions = torch.tensor(conditions, dtype=torch.float32)  # [N, 252]
+
+# Debug shapes
+print(f"Sequences tensor shape: {sequences.shape}")
+print(f"Conditions tensor shape: {conditions.shape}")
 
 # Standardize per sequence
 sequences = (sequences - sequences.mean(dim=1, keepdim=True)) / (sequences.std(dim=1, keepdim=True) + 1e-8)
 sequences = sequences * 0.015
 conditions = (conditions - conditions.mean()) / (conditions.std() + 1e-8)
+
+# Verify shape before saving
+print(f"Sequences shape before saving: {sequences.shape}")
+assert sequences.dim() == 2, f"Expected 2D tensor, got shape {sequences.shape}"
+assert sequences.shape[1] == sequence_length, f"Expected sequence length {sequence_length}, got {sequences.shape[1]}"
 
 # Save
 output_file = f"{output_dir}/sequences_{sequence_length}.pt"
