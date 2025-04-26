@@ -11,7 +11,7 @@ import os
 
 # Configuration
 sequence_length = 252
-epochs = 75
+epochs = 100  # Increased
 batch_size = 32
 num_timesteps = 100
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
@@ -26,8 +26,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load dataset statistics
 data = torch.load(data_file, weights_only=False)
-real_mean = data["sequences"].mean(dim=1, keepdim=True).mean().item()
-real_std = data["sequences"].std(dim=1, keepdim=True).mean().item()
+real_mean = 0.0  # Assume standardized
+real_std = 0.015  # Typical S&P 500 daily return std
 
 # Time embedding module
 class TimeEmbedding(nn.Module):
@@ -58,15 +58,15 @@ class ConditionEmbedding(nn.Module):
                                              batch_first=True)
     
     def forward(self, cond):
-        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond  # [batch, seq_len, 1]
-        cond_emb, _ = self.gru(cond)  # [batch, seq_len, cond_dim * 2]
-        cond_emb = self.linear(cond_emb)  # [batch, seq_len, cond_dim]
+        cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond
+        cond_emb, _ = self.gru(cond)
+        cond_emb = self.linear(cond_emb)
         cond_emb = self.relu(cond_emb)
-        cond_emb = self.proj(cond_emb)  # [batch, seq_len, d_model]
+        cond_emb = self.proj(cond_emb)
         cond_emb = self.norm(cond_emb)
         cond_res = cond_emb
-        cond_emb, _ = self.attention(cond_emb, cond_emb, cond_emb)  # [batch, seq_len, d_model]
-        cond_emb = cond_emb + cond_res  # Residual
+        cond_emb, _ = self.attention(cond_emb, cond_emb, cond_emb)
+        cond_emb = cond_emb + cond_res
         return cond_emb
 
 # Financial diffusion model
@@ -93,27 +93,27 @@ class FinancialDiffusionModel(nn.Module):
         self.dropout = nn.Dropout(0.1)
     
     def forward(self, x, t, cond):
-        x = x.unsqueeze(1)  # [batch, 1, seq_len]
-        time_emb = self.time_embedding(t)  # [batch, time_dim]
-        cond_emb = self.cond_embedding(cond)  # [batch, seq_len, d_model]
-        emb = self.emb_proj(time_emb).unsqueeze(1)  # [batch, 1, d_model]
-        x = self.input_proj[0](x)  # Conv1d: [batch, d_model, seq_len]
-        x = self.input_proj[1](x)  # ReLU
-        x = x.permute(0, 2, 1)    # [batch, seq_len, d_model]
-        x = self.input_proj[2](x)  # LayerNorm
-        x = x.permute(0, 2, 1)    # [batch, d_model, seq_len]
-        x = x.permute(0, 2, 1)    # [batch, seq_len, d_model]
-        x = x + emb  # Broadcast
-        x = x + cond_emb  # [batch, seq_len, d_model]
+        x = x.unsqueeze(1)
+        time_emb = self.time_embedding(t)
+        cond_emb = self.cond_embedding(cond)
+        emb = self.emb_proj(time_emb).unsqueeze(1)
+        x = self.input_proj[0](x)
+        x = self.input_proj[1](x)
+        x = x.permute(0, 2, 1)
+        x = self.input_proj[2](x)
+        x = x.permute(0, 2, 1)
+        x = x.permute(0, 2, 1)
+        x = x + emb
+        x = x + cond_emb
         x = self.transformer(x)
         x = self.dropout(x)
-        x = x.permute(0, 2, 1)  # [batch, d_model, seq_len]
-        x = self.output(x).squeeze(1)  # [batch, seq_len]
+        x = x.permute(0, 2, 1)
+        x = self.output(x).squeeze(1)
         return x
 
 # Diffusion process (DDIM)
 class Diffusion:
-    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.003):
+    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.002):  # Adjusted
         self.num_timesteps = num_timesteps
         self.betas = torch.linspace(beta_start, beta_end, num_timesteps).to(device)
         self.alphas = 1.0 - self.betas
@@ -133,8 +133,8 @@ class Diffusion:
         model.eval()
         with torch.no_grad():
             x = torch.randn(cond.shape[0], seq_len, device=cond.device)
-            steps = min(steps, self.num_timesteps)  # Ensure steps <= num_timesteps
-            skip = max(1, self.num_timesteps // steps)  # Avoid zero step
+            steps = min(steps, self.num_timesteps)
+            skip = max(1, self.num_timesteps // steps)
             timesteps = torch.arange(self.num_timesteps - 1, -1, -skip, device=device)
             for i, t_idx in enumerate(timesteps):
                 t = torch.full((cond.shape[0],), t_idx, device=cond.device, dtype=torch.long)
@@ -164,7 +164,7 @@ class FinancialDataset(Dataset):
     def __getitem__(self, idx):
         seq = self.sequences[idx]
         scale = torch.rand(1) * 0.2 + 0.9
-        seq = seq * scale + torch.randn_like(seq) * 0.01
+        seq = seq * scale + torch.randn_like(seq) * 0.005  # Reduced noise
         return seq, self.conditions[idx]
 
 # Training function
@@ -190,7 +190,6 @@ def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
         avg_loss = total_loss / len(train_loader)
         losses.append(avg_loss)
         print(f"Epoch {epoch+1}, Avg Loss: {avg_loss:.4f}")
-    # Save losses to file
     with open(loss_file, 'w') as f:
         for epoch, loss in enumerate(losses, 1):
             f.write(f"Epoch {epoch}, Avg Loss: {loss:.4f}\n")
@@ -212,7 +211,7 @@ if __name__ == "__main__":
     # Initialize model and diffusion
     model = FinancialDiffusionModel(time_dim=time_dim, cond_dim=cond_dim, d_model=d_model).to(device)
     diffusion = Diffusion(num_timesteps)
-    optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)  # Increased lr
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     
     # Train
@@ -225,9 +224,9 @@ if __name__ == "__main__":
     
     # Generate samples
     print(f"Generating samples with length {sequence_length}...")
-    cond = torch.ones(10, sequence_length, device=device) * 0.2
+    cond = data["conditions"][:10].to(device)  # Use real VIX
     samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
-                       steps=100, method="ddim")  # Reduced steps
+                       steps=100, method="ddim")
     
     # Save generated samples
     samples_np = samples.cpu().numpy()
@@ -236,7 +235,7 @@ if __name__ == "__main__":
         plt.plot(samples_np[i], label=f"Sample {i+1}")
     plt.xlabel("Day")
     plt.ylabel("Return")
-    plt.ylim(-3 * real_std, 3 * real_std)
+    plt.ylim(-0.05, 0.05)  # Expected range
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"generated_returns_{sequence_length}.png"))
