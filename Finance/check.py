@@ -11,7 +11,7 @@ import os
 # Configuration
 sequence_length = 252
 num_samples = 10
-steps = 100
+steps = 200  # Increased
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 model_file = f"financial_outputs/financial_diffusion_{sequence_length}.pth"
 output_dir = "financial_outputs"
@@ -21,11 +21,11 @@ time_dim = 512
 cond_dim = 64
 d_model = 256
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-real_std = 0.015  # Typical S&P 500 daily return std
-real_mean = 0.0   # Assume standardized
 
 # Load dataset
 data = torch.load(data_file, weights_only=False)
+real_mean = data["sequences"].mean().item()
+real_std = data["sequences"].std().item()
 
 # Time embedding module
 class TimeEmbedding(nn.Module):
@@ -111,7 +111,7 @@ class FinancialDiffusionModel(nn.Module):
 
 # Diffusion process (DDIM)
 class Diffusion:
-    def __init__(self, num_timesteps=100, beta_start=0.00005, beta_end=0.002):
+    def __init__(self, num_timesteps=100, beta_start=0.00005, beta_end=0.001):
         self.num_timesteps = num_timesteps
         self.betas = torch.linspace(beta_start, beta_end, num_timesteps).to(device)
         self.alphas = 1.0 - self.betas
@@ -264,7 +264,7 @@ if __name__ == "__main__":
     
     # Generate samples
     print(f"Generating {num_samples} samples with length {sequence_length}...")
-    cond = data["conditions"][:num_samples].to(device)  # Use real VIX
+    cond = data["conditions"][:num_samples].to(device)
     samples = generate_samples(model, diffusion, cond, sequence_length, steps)
     
     # Save generated samples
@@ -296,6 +296,6 @@ if __name__ == "__main__":
     plt.savefig(os.path.join(output_dir, f"acf_comparison_{sequence_length}.png"))
     plt.close()
     
-    print(f"Generated samples saved to {output_dir}/generated_returns_{sequence_length}.png")
+    print(f"Generated samples saved to {output_dir}/generated_returns_{sequence_length}.png")
     print(f"ACF comparison saved to {output_dir}/acf_comparison_{sequence_length}.png")
     print(f"Metrics saved to {metrics_file}")

@@ -1,39 +1,49 @@
+import yfinance as yf
+import pandas as pd
 import torch
-import os
-from tqdm import tqdm
+import numpy as np
 
 # Configuration
-data_dir = "financial_data"
-output_dir = os.path.join(data_dir, "sequences")
+sequence_length = 252
+start_date = "2019-01-01"
+end_date = "2024-12-31"
+output_dir = "financial_data/sequences"
 os.makedirs(output_dir, exist_ok=True)
-sequence_lengths = [63, 252]
-stride = 63
 
-# Load data
-sp500_data = torch.load(os.path.join(data_dir, "sp500_returns.pt"), weights_only=False)
-vix_data = torch.load(os.path.join(data_dir, "vix.pt"), weights_only=False)
+# Load S&P 500 tickers
+sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
+tickers = sp500['Symbol'].tolist()[:100]  # First 100 for simplicity
 
-# Handle dictionary structure
-sp500_data = sp500_data["returns"] if isinstance(sp500_data, dict) else sp500_data
-vix_data = vix_data["vix"] if isinstance(vix_data, dict) else vix_data
+# Download data
+sequences = []
+conditions = []
+for ticker in tickers:
+    try:
+        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+        if len(df) < sequence_length:
+            continue
+        returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
+        vix = yf.download('^VIX', start=start_date, end=end_date, progress=False)['Close']
+        vix = vix.reindex(returns.index, method='ffill').values
+        for i in range(0, len(returns) - sequence_length + 1, 10):
+            seq = returns[i:i+sequence_length].values
+            cond = vix[i:i+sequence_length]
+            if len(seq) == sequence_length and len(cond) == sequence_length:
+                sequences.append(seq)
+                conditions.append(cond)
+    except:
+        continue
 
-# Format sequences
-for seq_len in sequence_lengths:
-    sequences = []
-    conditions = []
-    n_stocks, n_days = sp500_data.shape
-    for stock_idx in tqdm(range(n_stocks), desc=f"Formatting sequences (length={seq_len})"):
-        stock_data = sp500_data[stock_idx]
-        for start in range(0, n_days - seq_len + 1, stride):
-            sequence = stock_data[start:start + seq_len]
-            vix_sequence = vix_data[start:start + seq_len]
-            if sequence.shape[0] == seq_len and vix_sequence.shape[0] == seq_len:
-                sequences.append(sequence)
-                conditions.append(vix_sequence)
-    
-    # Save sequences
-    sequences = torch.stack(sequences)
-    conditions = torch.stack(conditions)
-    output_file = os.path.join(output_dir, f"sequences_{seq_len}.pt")
-    torch.save({"sequences": sequences, "conditions": conditions}, output_file)
-    print(f"Saved {sequences.shape[0]} sequences of length {seq_len} to {output_file}")
+# Convert to tensor
+sequences = torch.tensor(sequences, dtype=torch.float32)
+conditions = torch.tensor(conditions, dtype=torch.float32)
+
+# Standardize per sequence
+sequences = (sequences - sequences.mean(dim=1, keepdim=True)) / sequences.std(dim=1, keepdim=True)
+sequences = sequences * 0.015  # Scale to typical std
+conditions = (conditions - conditions.mean()) / conditions.std()  # Normalize VIX
+
+# Save
+torch.save({"sequences": sequences, "conditions": conditions}, 
+           f"{output_dir}/sequences_{sequence_length}.pt")
+print(f"Saved {len(sequences)} sequences to sequences_{sequence_length}.pt")

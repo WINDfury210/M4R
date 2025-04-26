@@ -113,7 +113,7 @@ class FinancialDiffusionModel(nn.Module):
 
 # Diffusion process (DDIM)
 class Diffusion:
-    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.002):  # Adjusted
+    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.001):  # Adjusted
         self.num_timesteps = num_timesteps
         self.betas = torch.linspace(beta_start, beta_end, num_timesteps).to(device)
         self.alphas = 1.0 - self.betas
@@ -221,48 +221,3 @@ if __name__ == "__main__":
     print("All epoch losses:")
     for epoch, loss in enumerate(losses, 1):
         print(f"Epoch {epoch}, Avg Loss: {loss:.4f}")
-    
-    # Generate samples
-    print(f"Generating samples with length {sequence_length}...")
-    cond = data["conditions"][:10].to(device)  # Use real VIX
-    samples = generate(model, diffusion, cond, device, seq_len=sequence_length, 
-                       steps=100, method="ddim")
-    
-    # Save generated samples
-    samples_np = samples.cpu().numpy()
-    plt.figure(figsize=(10, 5))
-    for i in range(min(5, samples_np.shape[0])):
-        plt.plot(samples_np[i], label=f"Sample {i+1}")
-    plt.xlabel("Day")
-    plt.ylabel("Return")
-    plt.ylim(-0.05, 0.05)  # Expected range
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"generated_returns_{sequence_length}.png"))
-    plt.close()
-    torch.save(samples, os.path.join(output_dir, f"generated_returns_{sequence_length}.pt"))
-    
-    # Evaluation metrics
-    print("Evaluation metrics:")
-    gen_mean = samples_np.mean()
-    gen_std = samples_np.std()
-    gen_acf = acf(samples_np[0], nlags=20)
-    real_acf = acf(data["sequences"][0].numpy(), nlags=20)
-    print(f"Generated Mean: {gen_mean:.6f}, Real Mean: {real_mean:.6f}")
-    print(f"Generated Std: {gen_std:.6f}, Real Std: {real_std:.6f}")
-    print(f"Generated ACF (lags 1-5): {gen_acf[1:6].tolist()}")
-    print(f"Real ACF (lags 1-5): {real_acf[1:6].tolist()}")
-    
-    # Save ACF plot
-    plt.figure(figsize=(8, 4))
-    plt.plot(gen_acf, label="Generated")
-    plt.plot(real_acf, label="Real")
-    plt.xlabel("Lag")
-    plt.ylabel("ACF")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"acf_comparison_{sequence_length}.png"))
-    plt.close()
-    
-    print(f"Generated samples saved to {output_dir}/generated_returns_{sequence_length}.png")
-    print(f"ACF comparison saved to {output_dir}/acf_comparison_{sequence_length}.png")
