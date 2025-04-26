@@ -16,7 +16,7 @@ os.makedirs(output_dir, exist_ok=True)
 
 # Load S&P 500 tickers
 sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()
+tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()[:400]
 
 # Download data
 sequences = []
@@ -47,18 +47,18 @@ if failed_tickers:
     print(f"Failed tickers ({len(failed_tickers)}): {failed_tickers}")
 
 # Convert to numpy array and remove extra dimension
-sequences = np.array(sequences)  # [N, 252] or [N, 252, 1]
-sequences = np.squeeze(sequences)  # [N, 252]
-conditions = np.array(conditions)  # [N, 252] or [N, 252, 1]
-conditions = np.squeeze(conditions)  # [N, 252]
+sequences = np.array(sequences)
+sequences = np.squeeze(sequences)
+conditions = np.array(conditions)
+conditions = np.squeeze(conditions)
 
 # Debug shapes
 print(f"Sequences numpy shape: {sequences.shape}")
 print(f"Conditions numpy shape: {conditions.shape}")
 
 # Convert to tensor
-sequences = torch.tensor(sequences, dtype=torch.float32)  # [N, 252]
-conditions = torch.tensor(conditions, dtype=torch.float32)  # [N, 252]
+sequences = torch.tensor(sequences, dtype=torch.float32)
+conditions = torch.tensor(conditions, dtype=torch.float32)
 
 # Debug shapes
 print(f"Sequences tensor shape: {sequences.shape}")
@@ -66,11 +66,12 @@ print(f"Conditions tensor shape: {conditions.shape}")
 
 # Standardize per sequence
 sequences = (sequences - sequences.mean(dim=1, keepdim=True)) / (sequences.std(dim=1, keepdim=True) + 1e-8)
-sequences = sequences * 0.015
 conditions = (conditions - conditions.mean()) / (conditions.std() + 1e-8)
 
-# Verify shape before saving
+# Verify shape and statistics before saving
 print(f"Sequences shape before saving: {sequences.shape}")
+print(f"Sequences mean: {sequences.mean().item():.6f}")
+print(f"Sequences std: {sequences.std().item():.6f}")
 assert sequences.dim() == 2, f"Expected 2D tensor, got shape {sequences.shape}"
 assert sequences.shape[1] == sequence_length, f"Expected sequence length {sequence_length}, got {sequences.shape[1]}"
 
@@ -78,10 +79,3 @@ assert sequences.shape[1] == sequence_length, f"Expected sequence length {sequen
 output_file = f"{output_dir}/sequences_{sequence_length}.pt"
 torch.save({"sequences": sequences, "conditions": conditions}, output_file)
 print(f"Saved {len(sequences)} sequences to {output_file}")
-
-# Verify statistics
-print(f"Sequences mean: {sequences.mean().item():.6f}")
-print(f"Sequences std: {sequences.std().item():.6f}")
-print(f"Sequences shape: {sequences.shape}")
-print(f"Conditions mean: {conditions.mean().item():.6f}")
-print(f"Conditions std: {conditions.std().item():.6f}")

@@ -11,7 +11,7 @@ import os
 # Configuration
 sequence_length = 252
 num_samples = 10
-steps = 500
+steps = 1000
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 model_file = f"financial_outputs/financial_diffusion_{sequence_length}.pth"
 output_dir = "financial_outputs"
@@ -27,6 +27,7 @@ data = torch.load(data_file, weights_only=False)
 real_mean = data["sequences"].mean().item()
 real_std = data["sequences"].std().item()
 print(f"Loaded sequences shape: {data['sequences'].shape}")
+print(f"Real mean: {real_mean:.6f}, Real std: {real_std:.6f}")
 
 # Time embedding module
 class TimeEmbedding(nn.Module):
@@ -45,11 +46,12 @@ class TimeEmbedding(nn.Module):
 class ConditionEmbedding(nn.Module):
     def __init__(self, cond_dim, d_model):
         super().__init__()
-        self.gru = nn.GRU(1, cond_dim, num_layers=2, batch_first=True)
+        self.gru = nn.GRU(1, cond_dim, num_layers=1, batch_first=True)
         self.proj = nn.Linear(cond_dim, d_model)
         self.cond_attn = nn.MultiheadAttention(d_model, num_heads=8, batch_first=True)
         self.relu = nn.ReLU()
         self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(0.3)
     
     def forward(self, cond):
         cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond
@@ -58,6 +60,7 @@ class ConditionEmbedding(nn.Module):
         cond_emb = self.relu(cond_emb)
         cond_emb, _ = self.cond_attn(cond_emb, cond_emb, cond_emb)
         cond_emb = self.norm(cond_emb)
+        cond_emb = self.dropout(cond_emb)
         return cond_emb
 
 # Financial diffusion model
@@ -74,6 +77,7 @@ class FinancialDiffusionModel(nn.Module):
             num_layers=8)
         self.output = nn.Linear(d_model, 1)
         self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(0.3)
     
     def forward(self, x, t, cond):
         x = x.unsqueeze(-1)  # [batch, seq_len, 1]
@@ -85,12 +89,13 @@ class FinancialDiffusionModel(nn.Module):
         x = x + cond_emb
         x = self.transformer(x)
         x = self.norm(x)
+        x = self.dropout(x)
         x = self.output(x).squeeze(-1)  # [batch, seq_len]
         return x
 
 # Diffusion process
 class Diffusion:
-    def __init__(self, num_timesteps=200, beta_start=0.00005, beta_end=0.005):
+    def __init__(self, num_timesteps=200, beta_start=0.00005, beta_end=0.002):
         self.num_timesteps = num_timesteps
         self.betas = torch.cos(torch.linspace(0, np.pi/2, num_timesteps)) * (beta_end - beta_start) + beta_start
         self.betas = self.betas.to(device)

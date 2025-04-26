@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 sequence_length = 252
 batch_size = 32
 epochs = 200
-lr = 2e-5
+lr = 1e-5
 time_dim = 512
 cond_dim = 64
 d_model = 256
@@ -51,11 +51,12 @@ class TimeEmbedding(nn.Module):
 class ConditionEmbedding(nn.Module):
     def __init__(self, cond_dim, d_model):
         super().__init__()
-        self.gru = nn.GRU(1, cond_dim, num_layers=2, batch_first=True)
+        self.gru = nn.GRU(1, cond_dim, num_layers=1, batch_first=True)
         self.proj = nn.Linear(cond_dim, d_model)
         self.cond_attn = nn.MultiheadAttention(d_model, num_heads=8, batch_first=True)
         self.relu = nn.ReLU()
         self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(0.3)
     
     def forward(self, cond):
         cond = cond.unsqueeze(-1) if cond.dim() == 2 else cond
@@ -64,6 +65,7 @@ class ConditionEmbedding(nn.Module):
         cond_emb = self.relu(cond_emb)
         cond_emb, _ = self.cond_attn(cond_emb, cond_emb, cond_emb)
         cond_emb = self.norm(cond_emb)
+        cond_emb = self.dropout(cond_emb)
         return cond_emb
 
 # Financial diffusion model
@@ -80,6 +82,7 @@ class FinancialDiffusionModel(nn.Module):
             num_layers=8)
         self.output = nn.Linear(d_model, 1)
         self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(0.3)
     
     def forward(self, x, t, cond):
         x = x.unsqueeze(-1)  # [batch, seq_len, 1]
@@ -91,12 +94,13 @@ class FinancialDiffusionModel(nn.Module):
         x = x + cond_emb
         x = self.transformer(x)
         x = self.norm(x)
+        x = self.dropout(x)
         x = self.output(x).squeeze(-1)  # [batch, seq_len]
         return x
 
 # Diffusion process
 class Diffusion:
-    def __init__(self, num_timesteps=200, beta_start=0.00005, beta_end=0.005):
+    def __init__(self, num_timesteps=200, beta_start=0.00005, beta_end=0.002):
         self.num_timesteps = num_timesteps
         self.betas = torch.cos(torch.linspace(0, np.pi/2, num_timesteps)) * (beta_end - beta_start) + beta_start
         self.betas = self.betas.to(device)
@@ -112,8 +116,12 @@ class Diffusion:
         mse_loss = F.mse_loss(predicted_noise, noise)
         # Encourage negative skew and heavy tails
         skew_penalty = torch.mean(torch.relu(predicted_noise)) * 0.01
-        kurt_penalty = -torch.mean(predicted_noise**4) * 0.001
-        return mse_loss + skew_penalty + kurt_penalty
+        kurt_penalty = -torch.mean(predicted_noise**4) * 0.01
+        # Distribution alignment
+        gen_dist = predicted_noise.flatten()
+        real_dist = noise.flatten()
+        adv_loss = torch.mean((gen_dist - real_dist)**2) * 0.001
+        return mse_loss + skew_penalty + kurt_penalty + adv_loss
     
     def sample(self, model, cond, seq_len, steps, method="ddim", eta=0.1):
         model.eval()
