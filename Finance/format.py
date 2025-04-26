@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import torch
 import numpy as np
+import os
 
 # Configuration
 sequence_length = 252
