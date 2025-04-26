@@ -46,9 +46,11 @@ for ticker in tickers:
 if failed_tickers:
     print(f"Failed tickers ({len(failed_tickers)}): {failed_tickers}")
 
-# Convert to numpy array
-sequences = np.array(sequences)  # [N, 252]
-conditions = np.array(conditions)  # [N, 252]
+# Convert to numpy array and remove extra dimension
+sequences = np.array(sequences)  # [N, 252] or [N, 252, 1]
+sequences = np.squeeze(sequences)  # [N, 252]
+conditions = np.array(conditions)  # [N, 252] or [N, 252, 1]
+conditions = np.squeeze(conditions)  # [N, 252]
 
 # Debug shapes
 print(f"Sequences numpy shape: {sequences.shape}")
