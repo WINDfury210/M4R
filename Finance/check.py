@@ -11,7 +11,7 @@ import os
 # Configuration
 sequence_length = 252
 num_samples = 10
-steps = 200  # Increased
+steps = 200
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 model_file = f"financial_outputs/financial_diffusion_{sequence_length}.pth"
 output_dir = "financial_outputs"
@@ -91,7 +91,7 @@ class FinancialDiffusionModel(nn.Module):
         self.dropout = nn.Dropout(0.1)
     
     def forward(self, x, t, cond):
-        x = x.unsqueeze(1)
+        x = x.unsqueeze(1) if x.dim() == 2 else x
         time_emb = self.time_embedding(t)
         cond_emb = self.cond_embedding(cond)
         emb = self.emb_proj(time_emb).unsqueeze(1)
@@ -122,7 +122,7 @@ class Diffusion:
     def sample(self, model, cond, seq_len, steps, method="ddim", eta=0.0):
         model.eval()
         with torch.no_grad():
-            x = torch.randn(cond.shape[0], seq_len, device=cond.device)
+            x = torch.randn(cond.shape[0], seq_len, 1, device=cond.device)
             steps = min(steps, self.num_timesteps)
             skip = max(1, self.num_timesteps // steps)
             timesteps = torch.arange(self.num_timesteps - 1, -1, -skip, device=device)
@@ -160,8 +160,8 @@ def generate_samples(model, diffusion, cond, seq_len, steps, method="ddim", eta=
 
 # Evaluate samples
 def evaluate_samples(samples, real_data, nlags=20, window=20):
-    samples_np = samples.cpu().numpy()
-    real_np = real_data[:len(samples_np)].numpy()
+    samples_np = samples.cpu().numpy().squeeze(-1)  # [batch, seq_len]
+    real_np = real_data[:len(samples_np)].cpu().numpy().squeeze(-1)
     
     # Metrics
     metrics = {}
@@ -211,7 +211,7 @@ def save_metrics(metrics, file_path):
         print(f"Generated Std: {metrics['gen_std']:.6f}, Real Std: {metrics['real_std']:.6f}")
         f.write(f"Generated Std: {metrics['gen_std']:.6f}, Real Std: {metrics['real_std']:.6f}\n")
         
-        print(f"Generated Max: {metrics['gen_max']:.6f}, Real Max: {metrics['real_max']:.6f}")
+        print(f"Generated Max: {metrics['gen_max']:.6f}, Real Max: {metrics['gen_max']:.6f}")
         f.write(f"Generated Max: {metrics['gen_max']:.6f}, Real Max: {metrics['real_max']:.6f}\n")
         
         print(f"Generated Min: {metrics['gen_min']:.6f}, Real Min: {metrics['real_min']:.6f}")
@@ -268,7 +268,7 @@ if __name__ == "__main__":
     samples = generate_samples(model, diffusion, cond, sequence_length, steps)
     
     # Save generated samples
-    samples_np = samples.cpu().numpy()
+    samples_np = samples.cpu().numpy().squeeze(-1)
     plt.figure(figsize=(10, 5))
     for i in range(min(5, samples_np.shape[0])):
         plt.plot(samples_np[i], label=f"Sample {i+1}")

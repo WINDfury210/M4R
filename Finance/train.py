@@ -1,35 +1,39 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
 import numpy as np
-import matplotlib.pyplot as plt
-from statsmodels.tsa.stattools import acf
 import os
+import matplotlib.pyplot as plt
 
 # Configuration
 sequence_length = 252
-epochs = 100  # Increased
 batch_size = 32
-num_timesteps = 100
-data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
-output_dir = "financial_outputs"
-model_file = os.path.join(output_dir, f"financial_diffusion_{sequence_length}.pth")
-loss_file = os.path.join(output_dir, f"losses_{sequence_length}.txt")
-os.makedirs(output_dir, exist_ok=True)
+epochs = 100
+lr = 1e-4
 time_dim = 512
 cond_dim = 64
 d_model = 256
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
+output_dir = "financial_outputs"
+os.makedirs(output_dir, exist_ok=True)
 
-# Load dataset statistics
-data = torch.load(data_file, weights_only=False)
-real_mean = 0.0  # Assume standardized
-real_std = 0.015  # Typical S&P 500 daily return std
+# Dataset
+class FinancialDataset(Dataset):
+    def __init__(self, data_file):
+        data = torch.load(data_file, weights_only=False)
+        self.sequences = data["sequences"].float()  # [N, 252, 1]
+        self.conditions = data["conditions"].float()  # [N, 252]
+    
+    def __len__(self):
+        return len(self.sequences)
+    
+    def __getitem__(self, idx):
+        return self.sequences[idx], self.conditions[idx]
 
-# Time embedding module
+# Time embedding
 class TimeEmbedding(nn.Module):
     def __init__(self, dim, type="sinusoidal"):
         super().__init__()
@@ -44,7 +48,7 @@ class TimeEmbedding(nn.Module):
             emb = t[:, None] * emb[None, :]
             return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
 
-# Condition embedding module
+# Condition embedding
 class ConditionEmbedding(nn.Module):
     def __init__(self, cond_dim, d_model):
         super().__init__()
@@ -93,7 +97,7 @@ class FinancialDiffusionModel(nn.Module):
         self.dropout = nn.Dropout(0.1)
     
     def forward(self, x, t, cond):
-        x = x.unsqueeze(1)
+        x = x.unsqueeze(1) if x.dim() == 2 else x  # [batch, seq_len, 1]
         time_emb = self.time_embedding(t)
         cond_emb = self.cond_embedding(cond)
         emb = self.emb_proj(time_emb).unsqueeze(1)
@@ -111,9 +115,9 @@ class FinancialDiffusionModel(nn.Module):
         x = self.output(x).squeeze(1)
         return x
 
-# Diffusion process (DDIM)
+# Diffusion process
 class Diffusion:
-    def __init__(self, num_timesteps, beta_start=0.00005, beta_end=0.001):  # Adjusted
+    def __init__(self, num_timesteps=100, beta_start=0.00005, beta_end=0.001):
         self.num_timesteps = num_timesteps
         self.betas = torch.linspace(beta_start, beta_end, num_timesteps).to(device)
         self.alphas = 1.0 - self.betas
@@ -121,18 +125,16 @@ class Diffusion:
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - self.alpha_bars)
     
-    def training_loss(self, model, x0, t, cond, noise=None):
-        if noise is None:
-            noise = torch.randn_like(x0)
-        xt = self.sqrt_alpha_bars[t][:, None] * x0 + self.sqrt_one_minus_alpha_bars[t][:, None] * noise
-        pred_noise = model(xt, t, cond)
-        loss = F.mse_loss(pred_noise, noise, reduction='none').mean(dim=[1])
-        return (loss * self.sqrt_one_minus_alpha_bars[t] ** 2).mean()
-
+    def training_loss(self, model, x0, t, cond):
+        noise = torch.randn_like(x0)
+        xt = self.sqrt_alpha_bars[t][:, None, None] * x0 + self.sqrt_one_minus_alpha_bars[t][:, None, None] * noise
+        predicted_noise = model(xt, t, cond)
+        return F.mse_loss(predicted_noise, noise)
+    
     def sample(self, model, cond, seq_len, steps, method="ddim", eta=0.0):
         model.eval()
         with torch.no_grad():
-            x = torch.randn(cond.shape[0], seq_len, device=cond.device)
+            x = torch.randn(cond.shape[0], seq_len, 1, device=cond.device)
             steps = min(steps, self.num_timesteps)
             skip = max(1, self.num_timesteps // steps)
             timesteps = torch.arange(self.num_timesteps - 1, -1, -skip, device=device)
@@ -151,73 +153,45 @@ class Diffusion:
                 x = x + sigma * noise
         return x
 
-# Financial dataset
-class FinancialDataset(Dataset):
-    def __init__(self, data_file):
-        data = torch.load(data_file, weights_only=False)
-        self.sequences = data["sequences"]
-        self.conditions = data["conditions"]
-    
-    def __len__(self):
-        return len(self.sequences)
-    
-    def __getitem__(self, idx):
-        seq = self.sequences[idx]
-        scale = torch.rand(1) * 0.2 + 0.9
-        seq = seq * scale + torch.randn_like(seq) * 0.005  # Reduced noise
-        return seq, self.conditions[idx]
-
 # Training function
 def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
-    scaler = GradScaler('cuda')
     model.train()
     losses = []
     for epoch in range(epochs):
-        total_loss = 0
-        for sequences, cond in train_loader:
-            sequences = sequences.to(device)
-            cond = cond.to(device)
-            t = torch.randint(0, diffusion.num_timesteps, (sequences.shape[0],), device=device)
-            with autocast('cuda'):
-                loss = diffusion.training_loss(model, sequences, t, cond)
-            scaler.scale(loss).backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
+        epoch_loss = 0
+        for batch_idx, (sequences, cond) in enumerate(train_loader):
+            sequences, cond = sequences.to(device), cond.to(device)
             optimizer.zero_grad()
-            total_loss += loss.item()
+            t = torch.randint(0, diffusion.num_timesteps, (sequences.shape[0],), device=device)
+            loss = diffusion.training_loss(model, sequences, t, cond)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+            if batch_idx % 100 == 0:
+                print(f"Epoch {epoch+1}/{epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}")
         scheduler.step()
-        avg_loss = total_loss / len(train_loader)
+        avg_loss = epoch_loss / len(train_loader)
         losses.append(avg_loss)
-        print(f"Epoch {epoch+1}, Avg Loss: {avg_loss:.4f}")
-    with open(loss_file, 'w') as f:
-        for epoch, loss in enumerate(losses, 1):
-            f.write(f"Epoch {epoch}, Avg Loss: {loss:.4f}\n")
+        print(f"Epoch {epoch+1}/{epochs}, Average Loss: {avg_loss:.4f}")
+        torch.save(model.state_dict(), os.path.join(output_dir, f"financial_diffusion_{sequence_length}.pth"))
     return losses
-
-# Generation function
-def generate(model, diffusion, cond, device, seq_len, steps, method="ddim", eta=0.0):
-    model.load_state_dict(torch.load(model_file))
-    samples = diffusion.sample(model, cond, seq_len, steps, method, eta)
-    samples = samples * real_std + real_mean
-    return samples
 
 # Main execution
 if __name__ == "__main__":
-    # Data loader
-    train_loader = DataLoader(FinancialDataset(data_file), batch_size=batch_size, 
-                              shuffle=True, pin_memory=True)
+    print(f"Training with sequence length {sequence_length}...")
+    dataset = FinancialDataset(data_file)
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     
-    # Initialize model and diffusion
     model = FinancialDiffusionModel(time_dim=time_dim, cond_dim=cond_dim, d_model=d_model).to(device)
-    diffusion = Diffusion(num_timesteps)
-    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)  # Increased lr
+    diffusion = Diffusion(num_timesteps=100)
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     
-    # Train
-    print(f"Training with sequence length {sequence_length}...")
     losses = train(model, diffusion, train_loader, optimizer, scheduler, epochs, device)
-    print("Training completed.")
-    print("All epoch losses:")
-    for epoch, loss in enumerate(losses, 1):
-        print(f"Epoch {epoch}, Avg Loss: {loss:.4f}")
+    
+    plt.plot(losses)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.savefig(os.path.join(output_dir, f"training_loss_{sequence_length}.png"))
+    plt.close()
+    print(f"Training completed. Model saved to {output_dir}/financial_diffusion_{sequence_length}.pth")
