@@ -64,9 +64,9 @@ conditions = torch.tensor(conditions, dtype=torch.float32)
 print(f"Sequences tensor shape: {sequences.shape}")
 print(f"Conditions tensor shape: {conditions.shape}")
 
-# Standardize per sequence
-sequences = (sequences - sequences.mean(dim=1, keepdim=True)) / (sequences.std(dim=1, keepdim=True) + 1e-8)
-conditions = (conditions - conditions.mean()) / (conditions.std() + 1e-8)
+# # Standardize per sequence
+# sequences = (sequences - sequences.mean(dim=1, keepdim=True)) / (sequences.std(dim=1, keepdim=True) + 1e-8)
+# conditions = (conditions - conditions.mean()) / (conditions.std() + 1e-8)
 
 # Verify shape and statistics before saving
 print(f"Sequences shape before saving: {sequences.shape}")
