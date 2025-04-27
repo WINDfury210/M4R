@@ -7,18 +7,6 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 
-# Configuration
-sequence_length = 252
-batch_size = 32
-epochs = 200
-lr = 1e-5
-time_dim = 512
-cond_dim = 64
-d_model = 256
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
-output_dir = "financial_outputs"
-os.makedirs(output_dir, exist_ok=True)
 
 # Dataset
 class FinancialDataset(Dataset):
@@ -114,14 +102,18 @@ class Diffusion:
         xt = self.sqrt_alpha_bars[t][:, None] * x0 + self.sqrt_one_minus_alpha_bars[t][:, None] * noise
         predicted_noise = model(xt, t, cond)
         mse_loss = F.mse_loss(predicted_noise, noise)
-        # Encourage negative skew and heavy tails
-        skew_penalty = torch.mean(torch.relu(predicted_noise)) * 0.01
-        kurt_penalty = -torch.mean(predicted_noise**4) * 0.01
-        # Distribution alignment
-        gen_dist = predicted_noise.flatten()
-        real_dist = noise.flatten()
-        adv_loss = torch.mean((gen_dist - real_dist)**2) * 0.001
-        return mse_loss + skew_penalty + kurt_penalty + adv_loss
+        
+        return mse_loss
+        # # Encourage negative skew and heavy tails
+        
+        # skew_penalty = torch.mean(torch.relu(predicted_noise)) * 0.01
+        # kurt_penalty = -torch.mean(predicted_noise**4) * 0.01
+        
+        # # Distribution alignment
+        # gen_dist = predicted_noise.flatten()
+        # real_dist = noise.flatten()
+        # adv_loss = torch.mean((gen_dist - real_dist)**2) * 0.001
+        # return mse_loss + skew_penalty + kurt_penalty + adv_loss
     
     def sample(self, model, cond, seq_len, steps, method="ddim", eta=0.1):
         model.eval()
@@ -160,8 +152,7 @@ def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             epoch_loss += loss.item()
-            if batch_idx % 100 == 0:
-                print(f"Epoch {epoch+1}/{epochs}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+            
         scheduler.step()
         avg_loss = epoch_loss / len(train_loader)
         losses.append(avg_loss)
@@ -171,6 +162,19 @@ def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
 
 # Main execution
 if __name__ == "__main__":
+    # Configuration
+    sequence_length = 252
+    batch_size = 256
+    epochs = 200
+    lr = 1e-5
+    time_dim = 512
+    cond_dim = 64
+    d_model = 256
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
+    output_dir = "financial_outputs"
+    
+    os.makedirs(output_dir, exist_ok=True)
     print(f"Training with sequence length {sequence_length}...")
     dataset = FinancialDataset(data_file)
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
