@@ -30,13 +30,19 @@ for ticker in tickers:
             continue
         returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
         vix = yf.download('^VIX', start=start_date, end=end_date, progress=False, auto_adjust=True)['Close']
-        vix = vix.reindex(returns.index, method='ffill').values
-        for i in range(0, len(returns) - sequence_length + 1, 10):
-            seq = returns[i:i+sequence_length].values
-            cond = vix[i:i+sequence_length]
-            if len(seq) == sequence_length and len(cond) == sequence_length:
-                sequences.append(seq)
-                conditions.append(cond)
+        vix = vix.reindex(returns.index, method='ffill')
+        
+        # Group by month to get first trading day of each month
+        df.index = pd.to_datetime(df.index)
+        monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
+        for start_date in monthly_starts:
+            start_idx = returns.index.get_loc(start_date)
+            if start_idx + sequence_length <= len(returns):
+                seq = returns.iloc[start_idx:start_idx + sequence_length].values
+                cond = vix.iloc[start_idx:start_idx + sequence_length].values
+                if len(seq) == sequence_length and len(cond) == sequence_length:
+                    sequences.append(seq)
+                    conditions.append(cond)
     except Exception as e:
         failed_tickers.append(ticker)
         print(f"Failed to download {ticker}: {str(e)}")
@@ -64,14 +70,12 @@ conditions = torch.tensor(conditions, dtype=torch.float32)
 print(f"Sequences tensor shape: {sequences.shape}")
 print(f"Conditions tensor shape: {conditions.shape}")
 
-# # Standardize per sequence
-# sequences = (sequences - sequences.mean(dim=1, keepdim=True)) / (sequences.std(dim=1, keepdim=True) + 1e-8)
-# conditions = (conditions - conditions.mean()) / (conditions.std() + 1e-8)
-
 # Verify shape and statistics before saving
 print(f"Sequences shape before saving: {sequences.shape}")
 print(f"Sequences mean: {sequences.mean().item():.6f}")
 print(f"Sequences std: {sequences.std().item():.6f}")
+print(f"Conditions mean: {conditions.mean().item():.6f}")
+print(f"Conditions std: {conditions.std().item():.6f}")
 assert sequences.dim() == 2, f"Expected 2D tensor, got shape {sequences.shape}"
 assert sequences.shape[1] == sequence_length, f"Expected sequence length {sequence_length}, got {sequences.shape[1]}"
 
