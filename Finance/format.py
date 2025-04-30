@@ -1,97 +1,106 @@
-from alpha_vantage.timeseries import TimeSeries
+import yfinance as yf
 import pandas as pd
 import torch
 import numpy as np
 import os
-from datetime import datetime
-import warnings
 import time
-warnings.filterwarnings("ignore", category=UserWarning)
+import logging
+logging.basicConfig(level=logging.DEBUG)
 
-# Configuration
+# Config
 sequence_length = 252
 start_date = "2019-01-01"
 end_date = "2024-12-31"
 output_dir = "financial_data/sequences"
+cache_dir = "financial_data/cache"
 os.makedirs(output_dir, exist_ok=True)
-api_key = "YOUR_API_KEY"  # Replace with your Alpha Vantage API key
+os.makedirs(cache_dir, exist_ok=True)
 
-# Load S&P 500 tickers
+# Load tickers and sectors
 sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
 tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()[:400]
+company_info = sp500.set_index('Symbol')['GICS Sector'].to_dict()
+company_info = {k.replace('.', '-'): v for k, v in company_info.items()}
 
-# Initialize Alpha Vantage
-ts = TimeSeries(key=api_key, output_format='pandas')
+# Download with retry
+def download_with_retry(ticker, start, end, retries=10):
+    for attempt in range(retries):
+        try:
+            df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
+            return df
+        except Exception as e:
+            logging.warning(f"Attempt {attempt+1} failed for {ticker}: {e}")
+            if attempt < retries - 1:
+                time.sleep(15)
+    raise Exception(f"Failed to download {ticker} after {retries} attempts")
 
 # Download data
 sequences = []
-conditions = []
+start_dates = []
+sectors = []
 failed_tickers = []
-for ticker in tickers:
-    try:
-        # Download stock data
-        df, _ = ts.get_daily(symbol=ticker, outputsize='full')
-        df = df.loc[start_date:end_date].sort_index()
-        if df.empty or len(df) < sequence_length:
+batch_size = 3
+
+for i in range(0, len(tickers), batch_size):
+    for ticker in tickers[i:i + batch_size]:
+        cache_file = os.path.join(cache_dir, f"{ticker}.csv")
+        try:
+            if os.path.exists(cache_file):
+                df = pd.read_csv(cache_file, index_col='Date', parse_dates=True)
+                logging.info(f"Loaded {ticker}: {df.shape}")
+            else:
+                df = download_with_retry(ticker, start_date, end_date)
+                if df.empty or len(df) < sequence_length:
+                    failed_tickers.append(ticker)
+                    logging.warning(f"Skipping {ticker}: Insufficient data")
+                    continue
+                df.to_csv(cache_file)
+                logging.info(f"Downloaded {ticker}: {df.shape}")
+            
+            returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
+            df.index = pd.to_datetime(df.index)
+            monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
+            for start_date in monthly_starts:
+                start_idx = returns.index.get_loc(start_date)
+                if start_idx + sequence_length <= len(returns):
+                    seq = returns.iloc[start_idx:start_idx + sequence_length].values
+                    if len(seq) == sequence_length:
+                        sequences.append(seq)
+                        start_dates.append(start_date.strftime('%Y-%m-%d'))
+                        sectors.append(company_info.get(ticker, 'Unknown'))
+            logging.info(f"Processed {ticker}: {len(monthly_starts)} sequences")
+        except Exception as e:
             failed_tickers.append(ticker)
-            print(f"Skipping {ticker}: Empty or insufficient data")
-            continue
-        df.index = pd.to_datetime(df.index)
-        returns = np.log(df['4. close'] / df['4. close'].shift(1)).dropna()
-        
-        # Download VIX (CBOE Volatility Index)
-        vix_df, _ = ts.get_daily(symbol='VIX', outputsize='full')
-        vix_df = vix_df.loc[start_date:end_date].sort_index()
-        vix = vix_df['4. close'].reindex(returns.index, method='ffill')
-        
-        # Group by month
-        monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
-        for start_date in monthly_starts:
-            start_idx = returns.index.get_loc(start_date)
-            if start_idx + sequence_length <= len(returns):
-                seq = returns.iloc[start_idx:start_idx + sequence_length].values
-                cond = vix.iloc[start_idx:start_idx + sequence_length].values
-                if len(seq) == sequence_length and len(cond) == sequence_length:
-                    sequences.append(seq)
-                    conditions.append(cond)
-        print(f"Processed {ticker}: {len(monthly_starts)} sequences")
-    except Exception as e:
-        failed_tickers.append(ticker)
-        print(f"Failed to download {ticker}: {str(e)}")
-    time.sleep(12)  # Alpha Vantage free tier: 5 requests/min
+            logging.error(f"Failed {ticker}: {e}")
+        time.sleep(10)
 
-# Print failed tickers
 if failed_tickers:
-    print(f"Failed tickers ({len(failed_tickers)}): {failed_tickers}")
+    logging.info(f"Failed tickers ({len(failed_tickers)}): {failed_tickers}")
 
-# Convert to numpy array
-sequences = np.array(sequences)
-sequences = np.squeeze(sequences)
-conditions = np.array(conditions)
-conditions = np.squeeze(conditions)
-
-# Debug shapes
-print(f"Sequences numpy shape: {sequences.shape}")
-print(f"Conditions numpy shape: {conditions.shape}")
+# Convert to arrays
+sequences = np.squeeze(np.array(sequences))
+start_dates = np.array(start_dates)
+sectors = np.array(sectors)
 
 # Convert to tensor
 sequences = torch.tensor(sequences, dtype=torch.float32)
-conditions = torch.tensor(conditions, dtype=torch.float32)
 
-# Debug shapes
-print(f"Sequences tensor shape: {sequences.shape}")
-print(f"Conditions tensor shape: {conditions.shape}")
-
-# Verify statistics
-print(f"Sequences shape before saving: {sequences.shape}")
-print(f"Sequences mean: {sequences.mean().item():.6f}")
-print(f"Sequences std: {sequences.std().item():.6f}")
-print(f"Conditions mean: {conditions.mean().item():.6f}")
-print(f"Conditions std: {conditions.std().item():.6f}")
-assert sequences.dim() == 2, f"Expected 2D tensor, got shape {sequences.shape}"
-assert sequences.shape[1] == sequence_length, f"Expected sequence length {sequence_length}, got {sequences.shape[1]}"
+# Dimension check
+if sequences.shape[0] == 0:
+    raise ValueError("No sequences generated")
+if sequences.dim() != 2 or sequences.shape[1] != sequence_length:
+    raise ValueError(f"Expected shape (N, {sequence_length}), got {sequences.shape}")
+logging.info(f"Sequences shape: {sequences.shape}")
+logging.info(f"Start dates shape: {start_dates.shape}")
+logging.info(f"Sectors shape: {sectors.shape}")
+logging.info(f"Sequences mean: {sequences.mean().item():.6f}")
+logging.info(f"Sequences std: {sequences.std().item():.6f}")
 
 # Save
 output_file = f"{output_dir}/sequences_{sequence_length}.pt"
-torch.save({"sequences": sequences, "conditions": conditions}, output_file)
-print(f"Saved {len(sequences)} sequences to {output_file}")
+torch.save({
+    "sequences": sequences,
+    "start_dates": start_dates,
+    "sectors": sectors
+}, output_file)
+logging.info(f"Saved {len(sequences)} sequences to {output_file}")
