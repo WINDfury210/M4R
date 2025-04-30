@@ -23,7 +23,7 @@ try:
 except Exception as e:
     print(f"Failed to fetch S&P 500 tickers: {e}")
     exit(1)
-tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()[:400]
+tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()
 
 # 下载和处理股票数据
 sequences = []
