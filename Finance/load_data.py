@@ -33,58 +33,68 @@ failed_tickers = []
 
 for ticker in tickers:
     cache_file = os.path.join(cache_dir, f"{ticker}.csv")
-    try:
-        # 从缓存加载或下载数据
-        if os.path.exists(cache_file):
-            df = pd.read_csv(cache_file, index_col=0, parse_dates=True, date_format='%Y-%m-%d')
-            if not isinstance(df.index, pd.DatetimeIndex):
-                df.index = pd.to_datetime(df.index, format='%Y-%m-%d')
-        else:
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
-            if df.empty or len(df) < sequence_length:
+    df = None
+    retries = 3
+    for attempt in range(retries):
+        try:
+            # 从缓存加载
+            if os.path.exists(cache_file):
+                df = pd.read_csv(cache_file, index_col='Date', parse_dates=True, date_format='%Y-%m-%d')
+                if not isinstance(df.index, pd.DatetimeIndex) or df.index.name != 'Date':
+                    print(f"Invalid cache for {ticker}, redownloading")
+                    df = None
+            # 下载数据
+            if df is None:
+                df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+                if df.empty or len(df) < sequence_length:
+                    failed_tickers.append(ticker)
+                    print(f"Skipping {ticker}: insufficient data ({len(df)} days)")
+                    break
+                df.to_csv(cache_file, index_label='Date', date_format='%Y-%m-%d')
+            
+            # 获取公司市值
+            ticker_obj = yf.Ticker(ticker)
+            market_cap = ticker_obj.info.get('marketCap', None)
+            if market_cap is None:
                 failed_tickers.append(ticker)
-                print(f"Skipping {ticker}: insufficient data")
-                continue
-            df.to_csv(cache_file, date_format='%Y-%m-%d')
-        
-        # 获取公司市值
-        ticker_obj = yf.Ticker(ticker)
-        market_cap = ticker_obj.info.get('marketCap', None)
-        if market_cap is None:
-            failed_tickers.append(ticker)
-            print(f"Failed to get market cap for {ticker}")
-            continue
-        
-        # 计算对数回报
-        returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
-        if len(returns) < sequence_length:
-            failed_tickers.append(ticker)
-            print(f"Skipping {ticker}: insufficient returns")
-            continue
-        
-        # 按月截取序列
-        df.index = pd.to_datetime(df.index)
-        monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
-        for start_date in monthly_starts:
-            try:
-                start_idx = returns.index.searchsorted(start_date)
-                if start_idx + sequence_length <= len(returns):
-                    seq = returns.iloc[start_idx:start_idx + sequence_length].values
-                    if len(seq) == sequence_length and not np.any(np.isnan(seq)):
-                        sequences.append(seq.flatten())  # 确保一维
-                        date_vec = [
-                            (start_date.year - 2017) / 8.0,  # 2017-2024
-                            (start_date.month - 1) / 12.0,
-                            (start_date.day - 1) / 31.0
-                        ]
-                        start_dates.append(date_vec)
-                        market_caps.append(market_cap)
-            except Exception as e:
-                print(f"Skipping sequence for {ticker} at {start_date}: {e}")
-        print(f"Processed {ticker}: {len(monthly_starts)} sequences")
-    except Exception as e:
-        failed_tickers.append(ticker)
-        print(f"Failed {ticker}: {e}")
+                print(f"Failed to get market cap for {ticker}")
+                break
+            
+            # 计算对数回报
+            returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
+            if len(returns) < sequence_length:
+                failed_tickers.append(ticker)
+                print(f"Skipping {ticker}: insufficient returns ({len(returns)})")
+                break
+            
+            # 按月截取序列
+            df.index = pd.to_datetime(df.index)
+            monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
+            for start_date in monthly_starts:
+                try:
+                    start_idx = returns.index.get_loc(start_date)
+                    if start_idx + sequence_length <= len(returns):
+                        seq = returns.iloc[start_idx:start_idx + sequence_length].values
+                        if len(seq) == sequence_length and not np.any(np.isnan(seq)):
+                            sequences.append(seq.flatten())
+                            date_vec = [
+                                (start_date.year - 2017) / 8.0,
+                                (start_date.month - 1) / 12.0,
+                                (start_date.day - 1) / 31.0
+                            ]
+                            start_dates.append(date_vec)
+                            market_caps.append(market_cap)
+                except Exception as e:
+                    print(f"Skipping sequence for {ticker} at {start_date}: {e}")
+            print(f"Processed {ticker}: {len(monthly_starts)} sequences")
+            break
+        except Exception as e:
+            print(f"Attempt {attempt+1} failed for {ticker}: {e}")
+            if attempt < retries - 1:
+                time.sleep(2)
+            else:
+                failed_tickers.append(ticker)
+                print(f"Failed {ticker} after {retries} attempts")
     time.sleep(1)  # 避免 API 限制
 
 if failed_tickers:
@@ -100,7 +110,7 @@ market_caps = np.array(market_caps, dtype=np.float32)
 # 归一化市值
 if len(market_caps) > 0:
     market_caps = (market_caps - np.min(market_caps)) / (np.max(market_caps) - np.min(market_caps) + 1e-8)
-    market_caps = market_caps.reshape(-1, 1)  # [num_sequences, 1]
+    market_caps = market_caps.reshape(-1, 1)
 
 # 可选标准化序列
 if standardize:
