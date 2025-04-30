@@ -27,6 +27,8 @@ def download_with_retry(ticker, start, end, retries=10):
     for attempt in range(retries):
         try:
             df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
+            if df.empty or len(df) < sequence_length:
+                raise ValueError("Insufficient data")
             return df
         except Exception as e:
             logging.warning(f"Attempt {attempt+1} failed for {ticker}: {e}")
@@ -50,24 +52,28 @@ for i in range(0, len(tickers), batch_size):
                 logging.info(f"Loaded {ticker}: {df.shape}")
             else:
                 df = download_with_retry(ticker, start_date, end_date)
-                if df.empty or len(df) < sequence_length:
-                    failed_tickers.append(ticker)
-                    logging.warning(f"Skipping {ticker}: Insufficient data")
-                    continue
                 df.to_csv(cache_file)
                 logging.info(f"Downloaded {ticker}: {df.shape}")
             
             returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
+            if returns.empty or len(returns) < sequence_length:
+                failed_tickers.append(ticker)
+                logging.warning(f"Skipping {ticker}: Not enough returns")
+                continue
+            
             df.index = pd.to_datetime(df.index)
             monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
             for start_date in monthly_starts:
-                start_idx = returns.index.get_loc(start_date)
-                if start_idx + sequence_length <= len(returns):
-                    seq = returns.iloc[start_idx:start_idx + sequence_length].values
-                    if len(seq) == sequence_length:
-                        sequences.append(seq)
-                        start_dates.append(start_date.strftime('%Y-%m-%d'))
-                        sectors.append(company_info.get(ticker, 'Unknown'))
+                try:
+                    start_idx = returns.index.get_loc(start_date)
+                    if start_idx + sequence_length <= len(returns):
+                        seq = returns.iloc[start_idx:start_idx + sequence_length].values
+                        if len(seq) == sequence_length and not np.any(np.isnan(seq)):
+                            sequences.append(seq)
+                            start_dates.append(start_date.strftime('%Y-%m-%d'))
+                            sectors.append(company_info.get(ticker, 'Unknown'))
+                except Exception as e:
+                    logging.warning(f"Skipping sequence for {ticker} at {start_date}: {e}")
             logging.info(f"Processed {ticker}: {len(monthly_starts)} sequences")
         except Exception as e:
             failed_tickers.append(ticker)
