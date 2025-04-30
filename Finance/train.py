@@ -164,11 +164,11 @@ def train(model, diffusion, train_loader, optimizer, scheduler, epochs, device):
 if __name__ == "__main__":
     # Configuration
     sequence_length = 252
-    batch_size = 256
+    batch_size = 64
     epochs = 200
     lr = 1e-5
-    time_dim = 512
-    cond_dim = 64
+    time_dim = 256
+    cond_dim = 256
     d_model = 256
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
