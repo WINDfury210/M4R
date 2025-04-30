@@ -3,10 +3,10 @@ import pandas as pd
 import numpy as np
 import torch
 import os
-from datetime import datetime
 import time
 
 # 配置
+sequence_length = 252
 start_date = "2019-01-01"
 end_date = "2024-12-31"
 output_dir = "financial_data/sequences"
@@ -18,7 +18,11 @@ standardize = False  # 可调节标准化选项
 target_std = 0.015   # 标准化时的目标标准差
 
 # 获取 S&P 500 股票代码和行业分类
-sp500 = pd.read_html('[invalid url, do not cite])[0]
+try:
+    sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
+except Exception as e:
+    print(f"Failed to fetch S&P 500 tickers: {e}")
+    exit(1)
 tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()[:400]
 company_info = sp500.set_index('Symbol')['GICS Sector'].to_dict()
 company_info = {k.replace('.', '-'): v for k, v in company_info.items()}
@@ -44,6 +48,7 @@ for ticker in tickers:
                 continue
             df.to_csv(cache_file, date_format='%Y-%m-%d')
         
+        # 计算对数回报
         returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
         if len(returns) < sequence_length:
             failed_tickers.append(ticker)
@@ -53,18 +58,21 @@ for ticker in tickers:
         df.index = pd.to_datetime(df.index)
         monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
         for start_date in monthly_starts:
-            start_idx = returns.index.get_loc(start_date)
-            if start_idx + sequence_length <= len(returns):
-                seq = returns.iloc[start_idx:start_idx + sequence_length].values
-                if len(seq) == sequence_length and not np.any(np.isnan(seq)):
-                    sequences.append(seq)
-                    date_vec = [
-                        (start_date.year - 2019) / 6.0,
-                        (start_date.month - 1) / 12.0,
-                        (start_date.day - 1) / 31.0
-                    ]
-                    start_dates.append(date_vec)
-                    sectors.append(company_info.get(ticker, 'Unknown'))
+            try:
+                start_idx = returns.index.get_loc(start_date)
+                if start_idx + sequence_length <= len(returns):
+                    seq = returns.iloc[start_idx:start_idx + sequence_length].values
+                    if len(seq) == sequence_length and not np.any(np.isnan(seq)):
+                        sequences.append(seq)
+                        date_vec = [
+                            (start_date.year - 2019) / 6.0,
+                            (start_date.month - 1) / 12.0,
+                            (start_date.day - 1) / 31.0
+                        ]
+                        start_dates.append(date_vec)
+                        sectors.append(company_info.get(ticker, 'Unknown'))
+            except Exception as e:
+                print(f"Skipping sequence for {ticker} at {start_date}: {e}")
         print(f"Processed {ticker}: {len(monthly_starts)} sequences")
     except Exception as e:
         failed_tickers.append(ticker)
