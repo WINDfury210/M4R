@@ -48,15 +48,17 @@ for i in range(0, len(tickers), batch_size):
         cache_file = os.path.join(cache_dir, f"{ticker}.csv")
         try:
             if os.path.exists(cache_file):
-                df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+                df = pd.read_csv(cache_file, index_col=0, parse_dates=['Date'])
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index)
                 logging.info(f"Loaded {ticker}: {df.shape}")
             else:
                 df = download_with_retry(ticker, start_date, end_date)
-                df.to_csv(cache_file)
+                df.to_csv(cache_file, date_format='%Y-%m-%d')
                 logging.info(f"Downloaded {ticker}: {df.shape}")
             
             if not isinstance(df.index, pd.DatetimeIndex):
-                raise ValueError("Index is not DatetimeIndex")
+                raise ValueError(f"Index for {ticker} is not DatetimeIndex")
             
             returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
             if returns.empty or len(returns) < sequence_length:
@@ -67,12 +69,12 @@ for i in range(0, len(tickers), batch_size):
             monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
             for start_date in monthly_starts:
                 try:
-                    start_idx = returns.index.get_loc(start_date)
+                    start_date = pd.Timestamp(start_date)
+                    start_idx = returns.index.get_loc(start_date, method='nearest')
                     if start_idx + sequence_length <= len(returns):
                         seq = returns.iloc[start_idx:start_idx + sequence_length].values
                         if len(seq) == sequence_length and not np.any(np.isnan(seq)):
                             sequences.append(seq)
-                            # Store as [year, month, day], normalized
                             date_vec = [
                                 (start_date.year - 2019) / 6.0,
                                 (start_date.month - 1) / 12.0,
