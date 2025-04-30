@@ -23,7 +23,7 @@ try:
 except Exception as e:
     print(f"Failed to fetch S&P 500 tickers: {e}")
     exit(1)
-tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()
+tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()[:400]
 
 # 下载和处理股票数据
 sequences = []
@@ -36,13 +36,14 @@ for ticker in tickers:
     try:
         # 从缓存加载或下载数据
         if os.path.exists(cache_file):
-            df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+            df = pd.read_csv(cache_file, index_col=0, parse_dates=True, date_format='%Y-%m-%d')
             if not isinstance(df.index, pd.DatetimeIndex):
-                df.index = pd.to_datetime(df.index)
+                df.index = pd.to_datetime(df.index, format='%Y-%m-%d')
         else:
             df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
             if df.empty or len(df) < sequence_length:
                 failed_tickers.append(ticker)
+                print(f"Skipping {ticker}: insufficient data")
                 continue
             df.to_csv(cache_file, date_format='%Y-%m-%d')
         
@@ -58,6 +59,7 @@ for ticker in tickers:
         returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
         if len(returns) < sequence_length:
             failed_tickers.append(ticker)
+            print(f"Skipping {ticker}: insufficient returns")
             continue
         
         # 按月截取序列
@@ -65,19 +67,17 @@ for ticker in tickers:
         monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
         for start_date in monthly_starts:
             try:
-                start_idx = returns.index.get_loc(start_date)
+                start_idx = returns.index.searchsorted(start_date)
                 if start_idx + sequence_length <= len(returns):
                     seq = returns.iloc[start_idx:start_idx + sequence_length].values
                     if len(seq) == sequence_length and not np.any(np.isnan(seq)):
-                        sequences.append(seq)
-                        # 时间嵌入
+                        sequences.append(seq.flatten())  # 确保一维
                         date_vec = [
                             (start_date.year - 2017) / 8.0,  # 2017-2024
                             (start_date.month - 1) / 12.0,
                             (start_date.day - 1) / 31.0
                         ]
                         start_dates.append(date_vec)
-                        # 市值嵌入（暂存原始市值）
                         market_caps.append(market_cap)
             except Exception as e:
                 print(f"Skipping sequence for {ticker} at {start_date}: {e}")
@@ -91,6 +91,8 @@ if failed_tickers:
     print(f"Failed tickers ({len(failed_tickers)}): {failed_tickers}")
 
 # 转换为数组
+if len(sequences) == 0:
+    raise ValueError("No sequences generated")
 sequences = np.array(sequences, dtype=np.float32)
 start_dates = np.array(start_dates, dtype=np.float32)
 market_caps = np.array(market_caps, dtype=np.float32)
