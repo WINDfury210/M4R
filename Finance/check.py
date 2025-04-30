@@ -11,15 +11,15 @@ import os
 # Configuration
 sequence_length = 252
 num_samples = 10
-steps = 1000
+steps = 1200  # 增加步数以提高生成质量
 data_file = f"financial_data/sequences/sequences_{sequence_length}.pt"
 model_file = f"financial_outputs/financial_diffusion_{sequence_length}.pth"
 output_dir = "financial_outputs"
 metrics_file = os.path.join(output_dir, f"metrics_{sequence_length}.txt")
 os.makedirs(output_dir, exist_ok=True)
-time_dim = 512
-cond_dim = 64
-d_model = 256
+time_dim = 256  # 与 train.py 一致
+cond_dim = 256  # 与 train.py 一致
+d_model = 256   # 与 train.py 一致
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load dataset
@@ -65,7 +65,7 @@ class ConditionEmbedding(nn.Module):
 
 # Financial diffusion model
 class FinancialDiffusionModel(nn.Module):
-    def __init__(self, time_dim=512, cond_dim=64, d_model=256):
+    def __init__(self, time_dim=256, cond_dim=256, d_model=256):
         super().__init__()
         self.time_embedding = TimeEmbedding(time_dim)
         self.cond_embedding = ConditionEmbedding(cond_dim, d_model)
@@ -140,8 +140,7 @@ def energy_distance(x, y):
 def generate_samples(model, diffusion, cond, seq_len, steps, method="ddim", eta=0.1):
     model.load_state_dict(torch.load(model_file, map_location=device))
     samples = diffusion.sample(model, cond, seq_len, steps, method, eta)
-    samples = samples * real_std + real_mean
-    return samples
+    return samples  # 移除反标准化
 
 # Evaluate samples
 def evaluate_samples(samples, real_data, nlags=20, window=20):
