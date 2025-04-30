@@ -5,6 +5,7 @@ import numpy as np
 import os
 from datetime import datetime
 import warnings
+import time
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # Configuration
@@ -22,31 +23,46 @@ tickers = sp500['Symbol'].str.replace('.', '-', regex=False).tolist()[:400]
 sequences = []
 conditions = []
 failed_tickers = []
-for ticker in tickers:
-    try:
-        df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
-        if df.empty or len(df) < sequence_length:
+batch_size = 50
+
+# Download VIX first
+try:
+    vix_df = yf.download('^VIX', start=start_date, end=end_date, progress=False, auto_adjust=True)
+    if vix_df.empty:
+        raise ValueError("VIX data is empty")
+    print("VIX data downloaded successfully")
+except Exception as e:
+    print(f"Failed to download ^VIX: {str(e)}")
+    exit(1)
+
+for i in range(0, len(tickers), batch_size):
+    batch_tickers = tickers[i:i + batch_size]
+    for ticker in batch_tickers:
+        try:
+            df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+            if df.empty or len(df) < sequence_length:
+                failed_tickers.append(ticker)
+                print(f"Skipping {ticker}: Empty or insufficient data")
+                continue
+            returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
+            vix = vix_df['Close'].reindex(returns.index, method='ffill')
+            
+            # Group by month to get first trading day
+            df.index = pd.to_datetime(df.index)
+            monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
+            for start_date in monthly_starts:
+                start_idx = returns.index.get_loc(start_date)
+                if start_idx + sequence_length <= len(returns):
+                    seq = returns.iloc[start_idx:start_idx + sequence_length].values
+                    cond = vix.iloc[start_idx:start_idx + sequence_length].values
+                    if len(seq) == sequence_length and len(cond) == sequence_length:
+                        sequences.append(seq)
+                        conditions.append(cond)
+            print(f"Processed {ticker} successfully")
+        except Exception as e:
             failed_tickers.append(ticker)
-            continue
-        returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
-        vix = yf.download('^VIX', start=start_date, end=end_date, progress=False, auto_adjust=True)['Close']
-        vix = vix.reindex(returns.index, method='ffill')
-        
-        # Group by month to get first trading day of each month
-        df.index = pd.to_datetime(df.index)
-        monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
-        for start_date in monthly_starts:
-            start_idx = returns.index.get_loc(start_date)
-            if start_idx + sequence_length <= len(returns):
-                seq = returns.iloc[start_idx:start_idx + sequence_length].values
-                cond = vix.iloc[start_idx:start_idx + sequence_length].values
-                if len(seq) == sequence_length and len(cond) == sequence_length:
-                    sequences.append(seq)
-                    conditions.append(cond)
-    except Exception as e:
-        failed_tickers.append(ticker)
-        print(f"Failed to download {ticker}: {str(e)}")
-        continue
+            print(f"Failed to download {ticker}: {str(e)}")
+        time.sleep(1)  # Avoid rate limiting
 
 # Print failed tickers
 if failed_tickers:
