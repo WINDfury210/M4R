@@ -48,12 +48,15 @@ for i in range(0, len(tickers), batch_size):
         cache_file = os.path.join(cache_dir, f"{ticker}.csv")
         try:
             if os.path.exists(cache_file):
-                df = pd.read_csv(cache_file, index_col='Date', parse_dates=True)
+                df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
                 logging.info(f"Loaded {ticker}: {df.shape}")
             else:
                 df = download_with_retry(ticker, start_date, end_date)
                 df.to_csv(cache_file)
                 logging.info(f"Downloaded {ticker}: {df.shape}")
+            
+            if not isinstance(df.index, pd.DatetimeIndex):
+                raise ValueError("Index is not DatetimeIndex")
             
             returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
             if returns.empty or len(returns) < sequence_length:
@@ -61,7 +64,6 @@ for i in range(0, len(tickers), batch_size):
                 logging.warning(f"Skipping {ticker}: Not enough returns")
                 continue
             
-            df.index = pd.to_datetime(df.index)
             monthly_starts = df.groupby([df.index.year, df.index.month]).head(1).index
             for start_date in monthly_starts:
                 try:
@@ -70,7 +72,13 @@ for i in range(0, len(tickers), batch_size):
                         seq = returns.iloc[start_idx:start_idx + sequence_length].values
                         if len(seq) == sequence_length and not np.any(np.isnan(seq)):
                             sequences.append(seq)
-                            start_dates.append(start_date.strftime('%Y-%m-%d'))
+                            # Store as [year, month, day], normalized
+                            date_vec = [
+                                (start_date.year - 2019) / 6.0,
+                                (start_date.month - 1) / 12.0,
+                                (start_date.day - 1) / 31.0
+                            ]
+                            start_dates.append(date_vec)
                             sectors.append(company_info.get(ticker, 'Unknown'))
                 except Exception as e:
                     logging.warning(f"Skipping sequence for {ticker} at {start_date}: {e}")
@@ -84,18 +92,23 @@ if failed_tickers:
     logging.info(f"Failed tickers ({len(failed_tickers)}): {failed_tickers}")
 
 # Convert to arrays
-sequences = np.squeeze(np.array(sequences))
+sequences = np.array(sequences)
 start_dates = np.array(start_dates)
 sectors = np.array(sectors)
 
 # Convert to tensor
 sequences = torch.tensor(sequences, dtype=torch.float32)
+start_dates = torch.tensor(start_dates, dtype=torch.float32)
 
 # Dimension check
 if sequences.shape[0] == 0:
     raise ValueError("No sequences generated")
 if sequences.dim() != 2 or sequences.shape[1] != sequence_length:
     raise ValueError(f"Expected shape (N, {sequence_length}), got {sequences.shape}")
+if start_dates.shape != (sequences.shape[0], 3):
+    raise ValueError(f"Expected start_dates shape ({sequences.shape[0]}, 3), got {start_dates.shape}")
+if sectors.shape != (sequences.shape[0],):
+    raise ValueError(f"Expected sectors shape ({sequences.shape[0]},), got {sectors.shape}")
 logging.info(f"Sequences shape: {sequences.shape}")
 logging.info(f"Start dates shape: {start_dates.shape}")
 logging.info(f"Sectors shape: {sectors.shape}")
