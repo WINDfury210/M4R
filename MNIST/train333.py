@@ -285,7 +285,7 @@ if __name__ == "__main__":
         time_dim=512,
         channels=[32, 64, 128, 128, 256, 512]
     ).to(device)
-    diffusion = DiffusionProcess(num_timesteps=200, device=device)
+    diffusion = DiffusionProcess(num_timesteps=1000, device=device)
 
     optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=250, eta_min=1e-6)
