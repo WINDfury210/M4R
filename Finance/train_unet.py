@@ -1,10 +1,15 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
 import os
 from tqdm import tqdm
+import logging
+
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ==================== 模型架构 ====================
 class TimeEmbedding(nn.Module):
@@ -30,14 +35,14 @@ class FinancialUNet(nn.Module):
             nn.LeakyReLU(0.2)
         )
         
-        # 条件编码
+        # 条件编码 (3个日期特征 + 1个市值特征)
         self.cond_proj = nn.Sequential(
             nn.Linear(cond_dim, time_dim),
             nn.LeakyReLU(0.2),
             nn.Linear(time_dim, time_dim)
         )
         
-        # 主干网络
+        # 下采样路径
         self.down1 = nn.Sequential(
             nn.Conv1d(1, 32, 3, padding=1),
             nn.BatchNorm1d(32),
@@ -54,6 +59,8 @@ class FinancialUNet(nn.Module):
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2)
         )
+        
+        # 中间层
         self.mid = nn.Sequential(
             nn.Conv1d(64, 128, 3, padding=1),
             nn.BatchNorm1d(128),
@@ -62,8 +69,10 @@ class FinancialUNet(nn.Module):
             nn.BatchNorm1d(128),
             nn.LeakyReLU(0.2)
         )
+        
+        # 上采样路径
         self.up1 = nn.Sequential(
-            nn.Conv1d(128+64, 64, 3, padding=1),
+            nn.Conv1d(128+64, 64, 3, padding=1),  # 跳连接增加了通道数
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2),
             nn.Conv1d(64, 64, 3, padding=1),
@@ -71,23 +80,25 @@ class FinancialUNet(nn.Module):
             nn.LeakyReLU(0.2)
         )
         self.up2 = nn.Sequential(
-            nn.Conv1d(64+32, 32, 3, padding=1),
+            nn.Conv1d(64+32, 32, 3, padding=1),  # 跳连接增加了通道数
             nn.BatchNorm1d(32),
             nn.LeakyReLU(0.2),
             nn.Conv1d(32, 32, 3, padding=1),
             nn.BatchNorm1d(32),
             nn.LeakyReLU(0.2)
         )
+        
+        # 输出层
         self.output = nn.Conv1d(32, 1, 1)
         
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)  # [B, 1, seq_len]
         
         # 时间条件
-        t_emb = self.time_embed(t).unsqueeze(-1)
+        t_emb = self.time_embed(t).unsqueeze(-1)  # [B, time_dim, 1]
         
         # 项目条件
-        c_emb = self.cond_proj(cond).unsqueeze(-1)
+        c_emb = self.cond_proj(cond).unsqueeze(-1)  # [B, time_dim, 1]
         
         # 下采样
         x1 = self.down1(x) + t_emb + c_emb
@@ -99,6 +110,7 @@ class FinancialUNet(nn.Module):
         # 上采样
         x_up = F.interpolate(x_mid, scale_factor=2, mode='linear')
         x_up = self.up1(torch.cat([x_up, x2], dim=1)) + t_emb + c_emb
+        
         x_up = F.interpolate(x_up, scale_factor=2, mode='linear')
         x_up = self.up2(torch.cat([x_up, x1], dim=1)) + t_emb + c_emb
         
@@ -110,8 +122,12 @@ class DiffusionProcess:
         self.num_timesteps = num_timesteps
         self.device = device
         
-        # 线性调度
-        self.betas = torch.linspace(1e-4, 0.02, num_timesteps)
+        # 余弦调度
+        t = torch.linspace(0, 1, num_timesteps+1)
+        s = 0.008
+        f = torch.cos((t + s) / (1 + s) * torch.pi * 0.5) ** 2
+        self.betas = torch.clip(1 - (f[1:] / f[:-1]), 0, 0.999)
+        
         self.alphas = 1. - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
@@ -133,14 +149,19 @@ class DiffusionProcess:
 def train_and_save(data_path, save_dir="saved_models", epochs=100, batch_size=64):
     # 设备设置
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
     
     # 创建保存目录
     os.makedirs(save_dir, exist_ok=True)
     
-    # 加载数据
+    # 加载数据 - 完全适配您的数据结构
     data = torch.load(data_path)
     sequences = data["sequences"].float()
-    conditions = torch.cat([data["dates"], data["market_caps"]], dim=1).float()
+    start_dates = data["start_dates"].float()
+    market_caps = data["market_caps"].float()
+    
+    # 构建条件向量 [日期特征(3) + 市值(1)]
+    conditions = torch.cat([start_dates, market_caps], dim=1)
     
     # 数据集
     dataset = torch.utils.data.TensorDataset(sequences, conditions)
@@ -152,6 +173,7 @@ def train_and_save(data_path, save_dir="saved_models", epochs=100, batch_size=64
     
     # 优化器
     optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     
     # 训练循环
     for epoch in range(epochs):
@@ -181,32 +203,36 @@ def train_and_save(data_path, save_dir="saved_models", epochs=100, batch_size=64
             
             total_loss += loss.item()
         
+        # 更新学习率
+        scheduler.step()
+        
         # 打印进度
-        print(f"Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.4f}")
+        logger.info(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(train_loader):.4f}, LR: {scheduler.get_last_lr()[0]:.2e}")
         
         # 每20个epoch保存一次
-        if (epoch + 1) % 20 == 0:
+        if (epoch + 1) % 20 == 0 or (epoch + 1) == epochs:
             save_path = os.path.join(save_dir, f"financial_unet_epoch{epoch+1}.pth")
             torch.save(model.state_dict(), save_path)
-            print(f"Model saved to {save_path}")
+            logger.info(f"Model saved to {save_path}")
     
-    # 最终保存
-    final_path = os.path.join(save_dir, "financial_unet_final.pth")
-    torch.save(model.state_dict(), final_path)
-    print(f"Training completed. Final model saved to {final_path}")
+    logger.info("Training completed")
 
 # ==================== 主程序 ====================
 if __name__ == "__main__":
     # 配置参数
-    DATA_PATH = "financial_data/sequences/sequences_252.pt"  # 替换为你的数据路径
-    SAVE_DIR = "models"
+    DATA_PATH = "financial_data/sequences/sequences_252.pt"  # 您的数据路径
+    SAVE_DIR = "saved_models"
     EPOCHS = 100
     BATCH_SIZE = 64
     
     # 开始训练
-    train_and_save(
-        data_path=DATA_PATH,
-        save_dir=SAVE_DIR,
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE
-    )
+    try:
+        train_and_save(
+            data_path=DATA_PATH,
+            save_dir=SAVE_DIR,
+            epochs=EPOCHS,
+            batch_size=BATCH_SIZE
+        )
+    except Exception as e:
+        logger.error(f"Training failed: {str(e)}")
+        raise
