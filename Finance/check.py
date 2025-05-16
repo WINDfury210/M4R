@@ -8,6 +8,11 @@ from scipy.stats import ks_2samp, skew, kurtosis, wasserstein_distance
 import os
 import json
 from tqdm import tqdm
+import logging
+
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ==================== 配置参数 ====================
 SEQUENCE_LENGTH = 252
@@ -19,48 +24,46 @@ OUTPUT_DIR = "evaluation_results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ==================== 模型架构 ====================
+# ==================== 模型架构（必须与训练代码完全一致）====================
 class TimeEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
+        self.dim = dim
         half_dim = dim // 2
         emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
         self.register_buffer('emb', torch.exp(torch.arange(half_dim) * -emb))
-        self.time_mlp = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.LeakyReLU(0.2)
-        )
         
     def forward(self, time):
         emb = time[:, None] * self.emb[None, :]
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
-        return self.time_mlp(emb)
+        return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
 
 class FinancialUNet(nn.Module):
     def __init__(self, seq_len=252, cond_dim=4, time_dim=128):
         super().__init__()
         self.seq_len = seq_len
+        self.time_dim = time_dim
         
-        # 时间编码
+        # 时间编码（保持与训练代码完全一致）
         self.time_embed = TimeEmbedding(time_dim)
+        self.time_mlp = nn.Sequential(
+            nn.Linear(time_dim, 32),
+            nn.LeakyReLU(0.2)
+        )
         
-        # 条件编码
+        # 条件编码（保持与训练代码完全一致）
         self.cond_proj = nn.Sequential(
             nn.Linear(cond_dim, time_dim),
             nn.LeakyReLU(0.2),
             nn.Linear(time_dim, time_dim)
         )
-        
-        # 条件注入层
         self.cond_mlp = nn.Sequential(
             nn.Linear(time_dim, 32),
             nn.LeakyReLU(0.2)
         )
         
-        # 网络结构
+        # 网络结构（保持与训练代码完全一致）
         self.init_conv = nn.Conv1d(1, 32, 3, padding=1)
         
-        # 下采样
         self.down1 = nn.Sequential(
             nn.Conv1d(32, 32, 3, padding=1),
             nn.BatchNorm1d(32),
@@ -79,7 +82,6 @@ class FinancialUNet(nn.Module):
             nn.LeakyReLU(0.2)
         )
         
-        # 中间层
         self.mid = nn.Sequential(
             nn.Conv1d(128, 128, 3, padding=1),
             nn.BatchNorm1d(128),
@@ -89,7 +91,6 @@ class FinancialUNet(nn.Module):
             nn.LeakyReLU(0.2)
         )
         
-        # 上采样
         self.up1 = nn.Sequential(
             nn.Conv1d(128+64, 64, 3, padding=1),
             nn.BatchNorm1d(64),
@@ -108,30 +109,22 @@ class FinancialUNet(nn.Module):
             nn.LeakyReLU(0.2)
         )
         
-        # 输出层
         self.output = nn.Conv1d(32, 1, 1)
 
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)
         
-        # 处理条件
-        t_emb = self.time_embed(t)
-        t_emb = self.cond_mlp(t_emb).unsqueeze(-1)
+        # 处理条件（保持与训练代码完全一致）
+        t_emb = self.time_mlp(self.time_embed(t)).unsqueeze(-1)
+        c_emb = self.cond_mlp(self.cond_proj(cond)).unsqueeze(-1)
         
-        c_emb = self.cond_proj(cond)
-        c_emb = self.cond_mlp(c_emb).unsqueeze(-1)
-        
-        # 初始卷积
         x = self.init_conv(x) + t_emb + c_emb
         
-        # 下采样
         x1 = self.down1(F.max_pool1d(x, 2))
         x2 = self.down2(F.max_pool1d(x1, 2))
         
-        # 中间层
         x_mid = self.mid(x2)
         
-        # 上采样
         x_up = self.up1(torch.cat([
             F.interpolate(x_mid, scale_factor=2, mode='linear'), 
             x1
@@ -144,13 +137,13 @@ class FinancialUNet(nn.Module):
         
         return self.output(x_out).squeeze(1)
 
-# ==================== 扩散过程 ====================
+# ==================== 扩散过程（保持与训练代码完全一致）====================
 class DiffusionProcess(nn.Module):
     def __init__(self, num_timesteps=200, device="cpu"):
         super().__init__()
         self.num_timesteps = num_timesteps
         
-        # 余弦调度
+        # 余弦调度（保持与训练代码完全一致）
         t = torch.linspace(0, 1, num_timesteps+1)
         s = 0.008
         f = torch.cos((t + s) / (1 + s) * torch.pi * 0.5) ** 2
@@ -161,19 +154,12 @@ class DiffusionProcess(nn.Module):
         sqrt_alpha_bars = torch.sqrt(alpha_bars)
         sqrt_one_minus_alpha_bars = torch.sqrt(1. - alpha_bars)
         
-        # 注册缓冲区
+        # 注册缓冲区（保持与训练代码完全一致）
         self.register_buffer('betas', betas.to(device))
         self.register_buffer('alphas', alphas.to(device))
         self.register_buffer('alpha_bars', alpha_bars.to(device))
         self.register_buffer('sqrt_alpha_bars', sqrt_alpha_bars.to(device))
         self.register_buffer('sqrt_one_minus_alpha_bars', sqrt_one_minus_alpha_bars.to(device))
-    
-    def add_noise(self, x0, t):
-        noise = torch.randn_like(x0)
-        sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
-        sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
-        noisy = sqrt_alpha_bar * x0 + sqrt_one_minus * noise
-        return noisy, noise
     
     def sample(self, model, cond, steps=100, eta=0.0):
         model.eval()
@@ -199,7 +185,7 @@ class DiffusionProcess(nn.Module):
             
             return x
 
-# ==================== 评估函数 ====================
+# ==================== 数据加载 ====================
 def load_data():
     data = torch.load(DATA_FILE)
     sequences = data["sequences"].float()
@@ -208,6 +194,7 @@ def load_data():
     conditions = torch.cat([start_dates, market_caps], dim=1)
     return sequences, conditions
 
+# ==================== 评估指标 ====================
 def calculate_metrics(real_data, generated_data):
     real_np = real_data.cpu().numpy()
     gen_np = generated_data.cpu().numpy()
@@ -239,6 +226,7 @@ def calculate_metrics(real_data, generated_data):
     }
     return metrics
 
+# ==================== 可视化 ====================
 def visualize_results(real_data, generated_data, metrics, output_dir):
     # 样本路径
     plt.figure(figsize=(12, 6))
@@ -265,66 +253,66 @@ def visualize_results(real_data, generated_data, metrics, output_dir):
 
 # ==================== 主函数 ====================
 def main():
-    # 初始化
-    print("Initializing...")
-    sequences, conditions = load_data()
-    
-    # 加载模型
-    print("Loading model...")
-    model = FinancialUNet(seq_len=SEQUENCE_LENGTH, cond_dim=4).to(DEVICE)
     try:
-        state_dict = torch.load(MODEL_FILE, map_location=DEVICE)
-        # 处理可能的键名不匹配
-        if 'time_mlp.0.weight' in state_dict:
-            state_dict['time_embed.time_mlp.0.weight'] = state_dict.pop('time_mlp.0.weight')
-            state_dict['time_embed.time_mlp.0.bias'] = state_dict.pop('time_mlp.0.bias')
-            state_dict['cond_mlp.0.weight'] = state_dict.pop('cond_mlp.0.weight')
-            state_dict['cond_mlp.0.bias'] = state_dict.pop('cond_mlp.0.bias')
+        # 加载数据
+        logger.info("Loading data...")
+        sequences, conditions = load_data()
         
+        # 加载模型（严格匹配训练时的结构）
+        logger.info("Loading model...")
+        model = FinancialUNet(seq_len=SEQUENCE_LENGTH, cond_dim=4).to(DEVICE)
+        
+        # 检查模型参数是否匹配
+        state_dict = torch.load(MODEL_FILE, map_location=DEVICE)
+        
+        # 调试：打印模型和state_dict的键
+        logger.info("\nModel state dict keys:")
+        logger.info("\n".join(model.state_dict().keys()))
+        logger.info("\nLoaded state dict keys:")
+        logger.info("\n".join(state_dict.keys()))
+        
+        # 加载权重
         model.load_state_dict(state_dict, strict=True)
-        print("Model loaded successfully!")
+        logger.info("Model loaded successfully!")
+        
+        # 初始化扩散过程
+        diffusion = DiffusionProcess(num_timesteps=200, device=DEVICE)
+        
+        # 生成样本
+        logger.info(f"Generating {NUM_SAMPLES} samples...")
+        with torch.no_grad():
+            generated_samples = diffusion.sample(
+                model, 
+                conditions[:NUM_SAMPLES].to(DEVICE),
+                steps=STEPS
+            )
+        
+        # 计算评估指标
+        logger.info("Calculating metrics...")
+        metrics = calculate_metrics(sequences[:NUM_SAMPLES], generated_samples)
+        
+        # 保存结果
+        logger.info("Saving results...")
+        with open(os.path.join(OUTPUT_DIR, "metrics.json"), 'w') as f:
+            json.dump(metrics, f, indent=2)
+        
+        torch.save(generated_samples, os.path.join(OUTPUT_DIR, "generated_samples.pt"))
+        visualize_results(sequences[:5].cpu(), generated_samples[:5].cpu(), metrics, OUTPUT_DIR)
+        
+        # 打印摘要
+        logger.info("\nEvaluation Summary:")
+        logger.info(f"Mean: Real={metrics['basic_stats']['real_mean']:.4f}, Generated={metrics['basic_stats']['gen_mean']:.4f}")
+        logger.info(f"Std: Real={metrics['basic_stats']['real_std']:.4f}, Generated={metrics['basic_stats']['gen_std']:.4f}")
+        logger.info(f"KS Statistic: {metrics['distribution']['ks_stat']:.4f}")
+        logger.info(f"Wasserstein Distance: {metrics['distribution']['wasserstein']:.4f}")
+        logger.info(f"ACF MSE: {metrics['temporal']['acf_mse']:.4f}")
+        logger.info(f"Volatility Correlation: {metrics['temporal']['volatility_corr']:.4f}")
+        
+        logger.info(f"\nResults saved to {OUTPUT_DIR}")
+
     except Exception as e:
-        print(f"Error loading model: {str(e)}")
-        print("\nModel structure:")
-        print(model)
-        print("\nState dict keys:")
-        print(torch.load(MODEL_FILE, map_location=DEVICE).keys())
-        return
-    
-    model.eval()
-    diffusion = DiffusionProcess(num_timesteps=200, device=DEVICE)
-    
-    # 生成样本
-    print(f"Generating {NUM_SAMPLES} samples...")
-    with torch.no_grad():
-        generated_samples = diffusion.sample(
-            model, 
-            conditions[:NUM_SAMPLES].to(DEVICE),
-            steps=STEPS
-        )
-    
-    # 评估
-    print("Calculating metrics...")
-    metrics = calculate_metrics(sequences[:NUM_SAMPLES], generated_samples)
-    
-    # 保存结果
-    print("Saving results...")
-    with open(os.path.join(OUTPUT_DIR, "metrics.json"), 'w') as f:
-        json.dump(metrics, f, indent=2)
-    
-    torch.save(generated_samples, os.path.join(OUTPUT_DIR, "generated_samples.pt"))
-    visualize_results(sequences[:5].cpu(), generated_samples[:5].cpu(), metrics, OUTPUT_DIR)
-    
-    # 打印摘要
-    print("\nEvaluation Summary:")
-    print(f"Mean: Real={metrics['basic_stats']['real_mean']:.4f}, Generated={metrics['basic_stats']['gen_mean']:.4f}")
-    print(f"Std: Real={metrics['basic_stats']['real_std']:.4f}, Generated={metrics['basic_stats']['gen_std']:.4f}")
-    print(f"KS Statistic: {metrics['distribution']['ks_stat']:.4f}")
-    print(f"Wasserstein Distance: {metrics['distribution']['wasserstein']:.4f}")
-    print(f"ACF MSE: {metrics['temporal']['acf_mse']:.4f}")
-    print(f"Volatility Correlation: {metrics['temporal']['volatility_corr']:.4f}")
-    
-    print(f"\nResults saved to {OUTPUT_DIR}")
+        logger.error(f"Evaluation failed: {str(e)}", exc_info=True)
+        raise
 
 if __name__ == "__main__":
     main()
