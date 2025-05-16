@@ -14,7 +14,7 @@ SEQUENCE_LENGTH = 252
 NUM_SAMPLES = 1000
 STEPS = 200
 DATA_FILE = "financial_data/sequences/sequences_252.pt"
-MODEL_FILE = "saved_models/financial_unet_epoch100.pth"
+MODEL_FILE = "saved_models/financial_unet_final.pth"
 OUTPUT_DIR = "evaluation_results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -26,10 +26,15 @@ class TimeEmbedding(nn.Module):
         half_dim = dim // 2
         emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
         self.register_buffer('emb', torch.exp(torch.arange(half_dim) * -emb))
+        self.proj = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.LeakyReLU(0.2)
+        )
         
     def forward(self, time):
         emb = time[:, None] * self.emb[None, :]
-        return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+        return self.proj(emb)
 
 class FinancialUNet(nn.Module):
     def __init__(self, seq_len=252, cond_dim=4, time_dim=128):
@@ -37,23 +42,19 @@ class FinancialUNet(nn.Module):
         self.seq_len = seq_len
         
         # 时间编码
-        self.time_embed = nn.Sequential(
-            TimeEmbedding(time_dim),
-            nn.Linear(time_dim, time_dim),
-            nn.LeakyReLU(0.2)
-        )
+        self.time_embed = TimeEmbedding(time_dim)
         
-        # 条件编码 (3个日期特征 + 1个市值特征)
+        # 条件编码
         self.cond_proj = nn.Sequential(
             nn.Linear(cond_dim, time_dim),
             nn.LeakyReLU(0.2),
             nn.Linear(time_dim, time_dim)
         )
         
-        # 初始投影层
+        # 网络结构
         self.init_conv = nn.Conv1d(1, 32, 3, padding=1)
         
-        # 下采样路径
+        # 下采样
         self.down1 = nn.Sequential(
             nn.Conv1d(32, 32, 3, padding=1),
             nn.BatchNorm1d(32),
@@ -62,6 +63,7 @@ class FinancialUNet(nn.Module):
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2)
         )
+        
         self.down2 = nn.Sequential(
             nn.Conv1d(64, 64, 3, padding=1),
             nn.BatchNorm1d(64),
@@ -81,7 +83,7 @@ class FinancialUNet(nn.Module):
             nn.LeakyReLU(0.2)
         )
         
-        # 上采样路径
+        # 上采样
         self.up1 = nn.Sequential(
             nn.Conv1d(128+64, 64, 3, padding=1),
             nn.BatchNorm1d(64),
@@ -90,6 +92,7 @@ class FinancialUNet(nn.Module):
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2)
         )
+        
         self.up2 = nn.Sequential(
             nn.Conv1d(64+32, 32, 3, padding=1),
             nn.BatchNorm1d(32),
@@ -102,48 +105,38 @@ class FinancialUNet(nn.Module):
         # 输出层
         self.output = nn.Conv1d(32, 1, 1)
         
-        # 时间/条件投影层
-        self.time_mlp = nn.Sequential(
-            nn.Linear(time_dim, 32),
-            nn.LeakyReLU(0.2)
-        )
-        self.cond_mlp = nn.Sequential(
-            nn.Linear(time_dim, 32),
-            nn.LeakyReLU(0.2)
-        )
-        
+        # 条件注入
+        self.cond_inject = nn.Linear(time_dim, 32)
+
     def forward(self, x, t, cond):
-        x = x.unsqueeze(1)  # [B, 1, seq_len]
+        x = x.unsqueeze(1)
         
-        # 时间条件
-        t_emb = self.time_embed(t)  # [B, time_dim]
-        t_emb = self.time_mlp(t_emb).unsqueeze(-1)  # [B, 32, 1]
-        
-        # 项目条件
-        c_emb = self.cond_proj(cond)  # [B, time_dim]
-        c_emb = self.cond_mlp(c_emb).unsqueeze(-1)  # [B, 32, 1]
+        # 处理条件
+        t_emb = self.cond_inject(self.time_embed(t)).unsqueeze(-1)
+        c_emb = self.cond_inject(self.cond_proj(cond)).unsqueeze(-1)
         
         # 初始卷积
-        x = self.init_conv(x)  # [B, 32, seq_len]
-        
-        # 注入条件信息
-        x = x + t_emb + c_emb
+        x = self.init_conv(x) + t_emb + c_emb
         
         # 下采样
-        x1 = self.down1(F.max_pool1d(x, 2))  # [B, 64, seq_len//2]
-        x2 = self.down2(F.max_pool1d(x1, 2))  # [B, 128, seq_len//4]
+        x1 = self.down1(F.max_pool1d(x, 2))
+        x2 = self.down2(F.max_pool1d(x1, 2))
         
         # 中间层
-        x_mid = self.mid(x2)  # [B, 128, seq_len//4]
+        x_mid = self.mid(x2)
         
         # 上采样
-        x_up = F.interpolate(x_mid, scale_factor=2, mode='linear')  # [B, 128, seq_len//2]
-        x_up = self.up1(torch.cat([x_up, x1], dim=1))  # [B, 64, seq_len//2]
+        x_up = self.up1(torch.cat([
+            F.interpolate(x_mid, scale_factor=2, mode='linear'), 
+            x1
+        ], dim=1))
         
-        x_up = F.interpolate(x_up, scale_factor=2, mode='linear')  # [B, 64, seq_len]
-        x_up = self.up2(torch.cat([x_up, x], dim=1))  # [B, 32, seq_len]
+        x_out = self.up2(torch.cat([
+            F.interpolate(x_up, scale_factor=2, mode='linear'),
+            x
+        ], dim=1))
         
-        return self.output(x_up).squeeze(1)  # [B, seq_len]
+        return self.output(x_out).squeeze(1)
 
 # ==================== 扩散过程 ====================
 class DiffusionProcess(nn.Module):
@@ -179,29 +172,24 @@ class DiffusionProcess(nn.Module):
     def sample(self, model, cond, steps=100, eta=0.0):
         model.eval()
         with torch.no_grad():
-            # 初始噪声
             x = torch.randn(cond.shape[0], SEQUENCE_LENGTH, device=cond.device)
             
-            # 时间步安排
-            step_indices = torch.linspace(self.num_timesteps-1, 0, steps+1, dtype=torch.long)
-            
-            for i in tqdm(range(steps), desc="Sampling"):
-                t = step_indices[i]
-                t_next = step_indices[i+1] if i < steps-1 else -1
-                
-                # 预测噪声
+            for t in tqdm(reversed(range(0, self.num_timesteps, self.num_timesteps//steps)), 
+                         desc="Sampling"):
                 t_batch = torch.full((cond.shape[0],), t, device=cond.device)
                 pred_noise = model(x, t_batch, cond)
                 
-                # DDIM采样
                 alpha_bar = self.alpha_bars[t].view(-1, 1)
-                alpha_bar_next = self.alpha_bars[t_next].view(-1, 1) if t_next >=0 else 1.0
+                alpha_bar_prev = self.alpha_bars[max(t-1, 0)].view(-1, 1)
                 
                 x0_pred = (x - torch.sqrt(1 - alpha_bar) * pred_noise) / torch.sqrt(alpha_bar)
-                x = torch.sqrt(alpha_bar_next) * x0_pred + torch.sqrt(1 - alpha_bar_next - eta**2) * pred_noise
                 
-                if eta > 0 and t_next >= 0:
-                    x = x + eta * torch.sqrt(1 - alpha_bar_next) * torch.randn_like(x)
+                sigma = eta * torch.sqrt((1 - alpha_bar_prev)/(1 - alpha_bar)) * torch.sqrt(1 - alpha_bar/alpha_bar_prev)
+                
+                x = torch.sqrt(alpha_bar_prev) * x0_pred
+                if t > 0:
+                    x += torch.sqrt(1 - alpha_bar_prev - sigma**2) * pred_noise
+                    x += sigma * torch.randn_like(x)
             
             return x
 
@@ -219,43 +207,38 @@ def calculate_metrics(real_data, generated_data):
     gen_np = generated_data.cpu().numpy()
     
     metrics = {
-        # 基本统计量
-        'real_mean': float(real_np.mean()),
-        'gen_mean': float(gen_np.mean()),
-        'real_std': float(real_np.std()),
-        'gen_std': float(gen_np.std()),
-        'real_skew': float(skew(real_np.flatten())),
-        'gen_skew': float(skew(gen_np.flatten())),
-        'real_kurtosis': float(kurtosis(real_np.flatten())),
-        'gen_kurtosis': float(kurtosis(gen_np.flatten())),
-        
-        # 分布相似性
-        'ks_stat': float(ks_2samp(real_np.flatten(), gen_np.flatten())[0]),
-        'wasserstein': float(wasserstein_distance(real_np.flatten(), gen_np.flatten())),
-        
-        # 自相关比较
-        'acf_real': acf(real_np[0], nlags=20).tolist(),
-        'acf_gen': acf(gen_np[0], nlags=20).tolist(),
-        'acf_mse': float(np.mean((acf(real_np[0], nlags=20) - acf(gen_np[0], nlags=20))**2)),
-        
-        # 波动率聚类
-        'vol_real': calculate_volatility(real_np).tolist(),
-        'vol_gen': calculate_volatility(gen_np).tolist(),
-        'vol_corr': float(np.corrcoef(calculate_volatility(real_np), calculate_volatility(gen_np))[0,1])
+        'basic_stats': {
+            'real_mean': float(real_np.mean()),
+            'gen_mean': float(gen_np.mean()),
+            'real_std': float(real_np.std()),
+            'gen_std': float(gen_np.std()),
+            'real_skew': float(skew(real_np.flatten())),
+            'gen_skew': float(skew(gen_np.flatten())),
+            'real_kurtosis': float(kurtosis(real_np.flatten())),
+            'gen_kurtosis': float(kurtosis(gen_np.flatten()))
+        },
+        'distribution': {
+            'ks_stat': float(ks_2samp(real_np.flatten(), gen_np.flatten())[0]),
+            'wasserstein': float(wasserstein_distance(real_np.flatten(), gen_np.flatten()))
+        },
+        'temporal': {
+            'acf_real': acf(real_np[0], nlags=20).tolist(),
+            'acf_gen': acf(gen_np[0], nlags=20).tolist(),
+            'acf_mse': float(np.mean((acf(real_np[0], nlags=20) - acf(gen_np[0], nlags=20))**2)),
+            'volatility_corr': float(np.corrcoef(
+                [np.std(real_np[:, i:i+20], axis=1).mean() for i in range(real_np.shape[1]-20)],
+                [np.std(gen_np[:, i:i+20], axis=1).mean() for i in range(gen_np.shape[1]-20)]
+            )[0,1])
+        }
     }
     return metrics
 
-def calculate_volatility(data, window=20):
-    """计算滚动波动率"""
-    return np.array([np.std(data[:, i:i+window], axis=1).mean() 
-                    for i in range(data.shape[1] - window)])
-
 def visualize_results(real_data, generated_data, metrics, output_dir):
-    # 样本路径可视化
+    # 样本路径
     plt.figure(figsize=(12, 6))
     for i in range(5):
-        plt.plot(generated_data[i], alpha=0.6, label=f'Generated {i+1}' if i == 0 else "")
-        plt.plot(real_data[i], alpha=0.6, label=f'Real {i+1}' if i == 0 else "")
+        plt.plot(generated_data[i], alpha=0.6, label='Generated' if i==0 else "")
+        plt.plot(real_data[i], alpha=0.6, label='Real' if i==0 else "")
     plt.title("Sample Paths Comparison")
     plt.xlabel("Time")
     plt.ylabel("Returns")
@@ -263,44 +246,50 @@ def visualize_results(real_data, generated_data, metrics, output_dir):
     plt.savefig(os.path.join(output_dir, "sample_paths.png"))
     plt.close()
     
-    # 自相关函数比较
+    # 自相关函数
     plt.figure(figsize=(10, 5))
-    plt.plot(metrics['acf_real'], label='Real Data')
-    plt.plot(metrics['acf_gen'], label='Generated Data')
-    plt.title("Autocorrelation Function Comparison")
+    plt.plot(metrics['temporal']['acf_real'], label='Real')
+    plt.plot(metrics['temporal']['acf_gen'], label='Generated')
+    plt.title("Autocorrelation Function")
     plt.xlabel("Lag")
     plt.ylabel("ACF")
     plt.legend()
     plt.savefig(os.path.join(output_dir, "acf_comparison.png"))
     plt.close()
-    
-    # 波动率比较
-    plt.figure(figsize=(10, 5))
-    plt.plot(metrics['vol_real'], label='Real Data')
-    plt.plot(metrics['vol_gen'], label='Generated Data')
-    plt.title("Rolling Volatility Comparison (20-day window)")
-    plt.xlabel("Time")
-    plt.ylabel("Volatility")
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, "volatility_comparison.png"))
-    plt.close()
 
 # ==================== 主函数 ====================
 def main():
-    # 加载数据和模型
+    # 初始化
+    print("Initializing...")
     sequences, conditions = load_data()
-    model = FinancialUNet(seq_len=SEQUENCE_LENGTH, cond_dim=4).to(DEVICE)
-    model.load_state_dict(torch.load(MODEL_FILE, map_location=DEVICE))
-    model.eval()
     
-    diffusion = DiffusionProcess(num_timesteps=200, device=DEVICE).to(DEVICE)
+    # 加载模型
+    print("Loading model...")
+    model = FinancialUNet(seq_len=SEQUENCE_LENGTH, cond_dim=4).to(DEVICE)
+    try:
+        model.load_state_dict(torch.load(MODEL_FILE, map_location=DEVICE), strict=True)
+        print("Model loaded successfully!")
+    except Exception as e:
+        print(f"Error loading model: {str(e)}")
+        print("\nModel structure:")
+        print(model)
+        print("\nState dict keys:")
+        print(torch.load(MODEL_FILE, map_location=DEVICE).keys())
+        return
+    
+    model.eval()
+    diffusion = DiffusionProcess(num_timesteps=200, device=DEVICE)
     
     # 生成样本
-    print("Generating samples...")
+    print(f"Generating {NUM_SAMPLES} samples...")
     with torch.no_grad():
-        generated_samples = diffusion.sample(model, conditions[:NUM_SAMPLES].to(DEVICE), steps=STEPS)
+        generated_samples = diffusion.sample(
+            model, 
+            conditions[:NUM_SAMPLES].to(DEVICE),
+            steps=STEPS
+        )
     
-    # 计算评估指标
+    # 评估
     print("Calculating metrics...")
     metrics = calculate_metrics(sequences[:NUM_SAMPLES], generated_samples)
     
@@ -310,22 +299,18 @@ def main():
         json.dump(metrics, f, indent=2)
     
     torch.save(generated_samples, os.path.join(OUTPUT_DIR, "generated_samples.pt"))
-    
-    # 可视化
     visualize_results(sequences[:5].cpu(), generated_samples[:5].cpu(), metrics, OUTPUT_DIR)
     
-    # 打印关键指标
-    print("\nKey Metrics:")
-    print(f"Mean - Real: {metrics['real_mean']:.6f}, Generated: {metrics['gen_mean']:.6f}")
-    print(f"Std Dev - Real: {metrics['real_std']:.6f}, Generated: {metrics['gen_std']:.6f}")
-    print(f"Skewness - Real: {metrics['real_skew']:.6f}, Generated: {metrics['gen_skew']:.6f}")
-    print(f"Kurtosis - Real: {metrics['real_kurtosis']:.6f}, Generated: {metrics['gen_kurtosis']:.6f}")
-    print(f"KS Statistic: {metrics['ks_stat']:.6f}")
-    print(f"Wasserstein Distance: {metrics['wasserstein']:.6f}")
-    print(f"Volatility Correlation: {metrics['vol_corr']:.6f}")
-    print(f"ACF MSE: {metrics['acf_mse']:.6f}")
+    # 打印摘要
+    print("\nEvaluation Summary:")
+    print(f"Mean: Real={metrics['basic_stats']['real_mean']:.4f}, Generated={metrics['basic_stats']['gen_mean']:.4f}")
+    print(f"Std: Real={metrics['basic_stats']['real_std']:.4f}, Generated={metrics['basic_stats']['gen_std']:.4f}")
+    print(f"KS Statistic: {metrics['distribution']['ks_stat']:.4f}")
+    print(f"Wasserstein Distance: {metrics['distribution']['wasserstein']:.4f}")
+    print(f"ACF MSE: {metrics['temporal']['acf_mse']:.4f}")
+    print(f"Volatility Correlation: {metrics['temporal']['volatility_corr']:.4f}")
     
-    print(f"\nResults saved to {OUTPUT_DIR} directory")
+    print(f"\nResults saved to {OUTPUT_DIR}")
 
 if __name__ == "__main__":
     main()
