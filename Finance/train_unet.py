@@ -7,7 +7,7 @@ import os
 from tqdm import tqdm
 import logging
 import numpy as np
-from typing import List
+from typing import List, Tuple
 
 # ==================== 配置 ====================
 logging.basicConfig(
@@ -45,8 +45,13 @@ class FinancialDiffusion(nn.Module):
         super().__init__()
         self.seq_len = seq_len
         
+        # 验证序列长度可被下采样次数整除
+        n_down = len(channels) - 1
+        assert (seq_len % (2 ** n_down)) == 0, \
+            f"Sequence length {seq_len} must be divisible by {2 ** n_down} for {n_down} downsamplings"
+        
         # 激活函数
-        act = {
+        self.act = {
             "silu": nn.SiLU(),
             "leaky_relu": nn.LeakyReLU(0.2),
             "relu": nn.ReLU()
@@ -56,14 +61,14 @@ class FinancialDiffusion(nn.Module):
         self.time_embed = TimeEmbedding(time_dim)
         self.time_mlp = nn.Sequential(
             nn.Linear(time_dim, time_dim),
-            act,
+            self.act,
             nn.Linear(time_dim, channels[0])
         )
         
         # 条件编码
         self.cond_proj = nn.Sequential(
             nn.Linear(cond_dim, time_dim),
-            act,
+            self.act,
             nn.Linear(time_dim, channels[0])
         )
         
@@ -71,36 +76,40 @@ class FinancialDiffusion(nn.Module):
         self.input_conv = nn.Conv1d(1, channels[0], 3, padding=1)
         
         # 下采样路径
-        self.down = nn.ModuleList()
+        self.down_blocks = nn.ModuleList()
         for i in range(len(channels)-1):
-            self.down.append(DownBlock(
+            self.down_blocks.append(DownBlock(
                 in_ch=channels[i],
                 out_ch=channels[i+1],
                 num_blocks=num_blocks,
-                act=act
+                act=self.act
             ))
         
         # 中间层
-        self.mid = MidBlock(
+        self.mid_block = MidBlock(
             channels=channels[-1],
             num_blocks=num_blocks*2,
-            act=act
+            act=self.act
         )
         
         # 上采样路径
-        self.up = nn.ModuleList()
+        self.up_blocks = nn.ModuleList()
         for i in reversed(range(len(channels)-1)):
-            self.up.append(UpBlock(
-                in_ch=channels[i+1]*2,  # skip连接
+            self.up_blocks.append(UpBlock(
+                in_ch=channels[i+1],
                 out_ch=channels[i],
+                skip_ch=channels[i],
                 num_blocks=num_blocks,
-                act=act
+                act=self.act
             ))
         
         # 输出层
         self.output = nn.Conv1d(channels[0], 1, 1)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        # 保存原始长度
+        orig_len = x.shape[-1]
+        
         # 时间条件
         t_emb = self.time_mlp(self.time_embed(t)).unsqueeze(-1)
         
@@ -110,22 +119,25 @@ class FinancialDiffusion(nn.Module):
         # 初始卷积
         x = self.input_conv(x.unsqueeze(1)) + t_emb + c_emb
         
-        # 下采样
+        # 下采样并保存跳跃连接
         skips = []
-        for block in self.down:
-            x = block(x)
+        for block in self.down_blocks:
             skips.append(x)
+            x = block(x)
         
         # 中间层
-        x = self.mid(x)
+        x = self.mid_block(x)
         
-        # 上采样
-        for i, block in enumerate(self.up):
-            x = block(torch.cat([x, skips[-i-1]], dim=1))
+        # 上采样并与跳跃连接拼接
+        for i, block in enumerate(self.up_blocks):
+            x = block(x, skips[-(i+1)])
+        
+        # 确保输出长度与输入一致
+        if x.shape[-1] != orig_len:
+            x = F.interpolate(x, size=orig_len, mode='linear')
         
         return self.output(x).squeeze(1)
 
-# ==================== 模块组件 ====================
 class DownBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, num_blocks: int, act: nn.Module):
         super().__init__()
@@ -144,22 +156,37 @@ class DownBlock(nn.Module):
         return self.net(x)
 
 class UpBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, num_blocks: int, act: nn.Module):
+    def __init__(
+        self, 
+        in_ch: int, 
+        out_ch: int, 
+        skip_ch: int,
+        num_blocks: int, 
+        act: nn.Module
+    ):
         super().__init__()
         self.upsample = nn.Upsample(scale_factor=2, mode='linear')
+        self.conv = nn.Conv1d(in_ch + skip_ch, out_ch, 1)
+        
         layers = []
         for _ in range(num_blocks):
             layers.extend([
-                nn.Conv1d(in_ch, out_ch, 3, padding=1),
+                nn.Conv1d(out_ch, out_ch, 3, padding=1),
                 nn.GroupNorm(8, out_ch),
                 act
             ])
-            in_ch = out_ch
-        self.net = nn.Sequential(*layers)
+        self.blocks = nn.Sequential(*layers)
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.upsample(x)
-        return self.net(x)
+        
+        # 调整skip连接尺寸
+        if skip.shape[-1] != x.shape[-1]:
+            skip = F.interpolate(skip, size=x.shape[-1], mode='linear')
+        
+        x = torch.cat([x, skip], dim=1)
+        x = self.conv(x)
+        return self.blocks(x)
 
 class MidBlock(nn.Module):
     def __init__(self, channels: int, num_blocks: int, act: nn.Module):
@@ -200,7 +227,7 @@ class DiffusionProcess(nn.Module):
         self.register_buffer('sqrt_alpha_bars', sqrt_alpha_bars.to(device))
         self.register_buffer('sqrt_one_minus_alpha_bars', sqrt_one_minus_alpha_bars.to(device))
     
-    def add_noise(self, x0: torch.Tensor, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def add_noise(self, x0: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         noise = torch.randn_like(x0)
         sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
@@ -210,7 +237,7 @@ class DiffusionProcess(nn.Module):
     def sample(self, model: nn.Module, cond: torch.Tensor, steps: int = 100) -> torch.Tensor:
         model.eval()
         with torch.no_grad():
-            x = torch.randn(cond.shape[0], self.seq_len, device=cond.device)
+            x = torch.randn(cond.shape[0], model.seq_len, device=cond.device)
             
             for t in tqdm(reversed(range(0, self.num_timesteps, self.num_timesteps//steps)), 
                          desc="Sampling"):
@@ -249,7 +276,7 @@ class FinancialDataset(Dataset):
     def __len__(self) -> int:
         return len(self.sequences)
     
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.sequences[idx], self.conditions[idx]
 
 # ==================== 训练器 ====================
@@ -322,19 +349,26 @@ def train_and_evaluate(
 if __name__ == "__main__":
     # 配置
     config = {
-        "data_path": "financial_data/sequences/sequences_252.pt",
+        "data_path": "financial_data/sequences_252.pt",
         "save_dir": "saved_models",
         "epochs": 1000,
         "batch_size": 64,
         "model_config": {
             "seq_len": 252,
             "cond_dim": 4,
-            "time_dim": 128,
+            "time_dim": 256,
             "channels": [32, 64, 128, 256, 512],  # 控制模型深度和宽度
             "num_blocks": 2,
             "activation": "silu"
         }
     }
+    
+    # 调整序列长度使其可被下采样次数整除
+    n_down = len(config["model_config"]["channels"]) - 1
+    if config["model_config"]["seq_len"] % (2 ** n_down) != 0:
+        new_len = (config["model_config"]["seq_len"] // (2 ** n_down)) * (2 ** n_down)
+        logger.warning(f"Adjusting sequence length from {config['model_config']['seq_len']} to {new_len} for compatibility")
+        config["model_config"]["seq_len"] = new_len
     
     try:
         train_and_evaluate(**config)
