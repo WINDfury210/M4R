@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class TimeEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
+        self.dim = dim
         half_dim = dim // 2
         emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
         self.register_buffer('emb', torch.exp(torch.arange(half_dim) * -emb))
@@ -27,13 +28,10 @@ class FinancialUNet(nn.Module):
     def __init__(self, seq_len=252, cond_dim=4, time_dim=128):
         super().__init__()
         self.seq_len = seq_len
+        self.time_dim = time_dim
         
         # 时间编码
-        self.time_embed = nn.Sequential(
-            TimeEmbedding(time_dim),
-            nn.Linear(time_dim, time_dim),
-            nn.LeakyReLU(0.2)
-        )
+        self.time_embed = TimeEmbedding(time_dim)
         
         # 条件编码 (3个日期特征 + 1个市值特征)
         self.cond_proj = nn.Sequential(
@@ -42,27 +40,30 @@ class FinancialUNet(nn.Module):
             nn.Linear(time_dim, time_dim)
         )
         
+        # 初始投影层
+        self.init_conv = nn.Conv1d(1, 32, 3, padding=1)
+        
         # 下采样路径
         self.down1 = nn.Sequential(
-            nn.Conv1d(1, 32, 3, padding=1),
-            nn.BatchNorm1d(32),
-            nn.LeakyReLU(0.2),
             nn.Conv1d(32, 32, 3, padding=1),
             nn.BatchNorm1d(32),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(32, 64, 3, padding=1),
+            nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2)
         )
         self.down2 = nn.Sequential(
-            nn.Conv1d(32, 64, 3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.LeakyReLU(0.2),
             nn.Conv1d(64, 64, 3, padding=1),
             nn.BatchNorm1d(64),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(64, 128, 3, padding=1),
+            nn.BatchNorm1d(128),
             nn.LeakyReLU(0.2)
         )
         
         # 中间层
         self.mid = nn.Sequential(
-            nn.Conv1d(64, 128, 3, padding=1),
+            nn.Conv1d(128, 128, 3, padding=1),
             nn.BatchNorm1d(128),
             nn.LeakyReLU(0.2),
             nn.Conv1d(128, 128, 3, padding=1),
@@ -91,36 +92,53 @@ class FinancialUNet(nn.Module):
         # 输出层
         self.output = nn.Conv1d(32, 1, 1)
         
+        # 时间/条件投影层
+        self.time_mlp = nn.Sequential(
+            nn.Linear(time_dim, 32),
+            nn.LeakyReLU(0.2)
+        )
+        self.cond_mlp = nn.Sequential(
+            nn.Linear(time_dim, 32),
+            nn.LeakyReLU(0.2)
+        )
+        
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)  # [B, 1, seq_len]
         
         # 时间条件
-        t_emb = self.time_embed(t).unsqueeze(-1)  # [B, time_dim, 1]
+        t_emb = self.time_embed(t)  # [B, time_dim]
+        t_emb = self.time_mlp(t_emb).unsqueeze(-1)  # [B, 32, 1]
         
         # 项目条件
-        c_emb = self.cond_proj(cond).unsqueeze(-1)  # [B, time_dim, 1]
+        c_emb = self.cond_proj(cond)  # [B, time_dim]
+        c_emb = self.cond_mlp(c_emb).unsqueeze(-1)  # [B, 32, 1]
+        
+        # 初始卷积
+        x = self.init_conv(x)  # [B, 32, seq_len]
+        
+        # 注入条件信息
+        x = x + t_emb + c_emb
         
         # 下采样
-        x1 = self.down1(x) + t_emb + c_emb
-        x2 = self.down2(F.max_pool1d(x1, 2)) + t_emb + c_emb
+        x1 = self.down1(F.max_pool1d(x, 2))  # [B, 64, seq_len//2]
+        x2 = self.down2(F.max_pool1d(x1, 2))  # [B, 128, seq_len//4]
         
         # 中间层
-        x_mid = self.mid(F.max_pool1d(x2, 2)) + t_emb + c_emb
+        x_mid = self.mid(x2)  # [B, 128, seq_len//4]
         
         # 上采样
-        x_up = F.interpolate(x_mid, scale_factor=2, mode='linear')
-        x_up = self.up1(torch.cat([x_up, x2], dim=1)) + t_emb + c_emb
+        x_up = F.interpolate(x_mid, scale_factor=2, mode='linear')  # [B, 128, seq_len//2]
+        x_up = self.up1(torch.cat([x_up, x1], dim=1))  # [B, 64, seq_len//2]
         
-        x_up = F.interpolate(x_up, scale_factor=2, mode='linear')
-        x_up = self.up2(torch.cat([x_up, x1], dim=1)) + t_emb + c_emb
+        x_up = F.interpolate(x_up, scale_factor=2, mode='linear')  # [B, 64, seq_len]
+        x_up = self.up2(torch.cat([x_up, x], dim=1))  # [B, 32, seq_len]
         
-        return self.output(x_up).squeeze(1)
+        return self.output(x_up).squeeze(1)  # [B, seq_len]
 
 # ==================== 扩散过程 ====================
-class DiffusionProcess(nn.Module):  # 修改为继承自nn.Module
+class DiffusionProcess(nn.Module):
     def __init__(self, num_timesteps=200, device="cpu"):
-        super().__init__()  # 调用父类初始化
-        
+        super().__init__()
         self.num_timesteps = num_timesteps
         
         # 余弦调度
@@ -172,7 +190,7 @@ def train_and_save(data_path, save_dir="saved_models", epochs=100, batch_size=64
     
     # 初始化模型
     model = FinancialUNet(seq_len=252, cond_dim=4).to(device)
-    diffusion = DiffusionProcess(num_timesteps=200, device=device).to(device)  # 确保扩散模型也在正确设备上
+    diffusion = DiffusionProcess(num_timesteps=200, device=device).to(device)
     
     # 优化器
     optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
