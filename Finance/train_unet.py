@@ -230,9 +230,9 @@ def train_and_save(data_path, save_dir="saved_models", epochs=100, batch_size=64
         # 打印进度
         logger.info(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(train_loader):.4f}, LR: {scheduler.get_last_lr()[0]:.2e}")
         
-        # 每20个epoch保存一次
-        if (epoch + 1) % 20 == 0 or (epoch + 1) == epochs:
-            save_path = os.path.join(save_dir, f"financial_unet_epoch{epoch+1}.pth")
+        # 每500个epoch保存一次
+        if (epoch + 1) % 500 == 0 or (epoch + 1) == epochs:
+            save_path = os.path.join(save_dir, f"financial_unet_{epoch+1}.pth")
             torch.save(model.state_dict(), save_path)
             logger.info(f"Model saved to {save_path}")
     
@@ -243,7 +243,7 @@ if __name__ == "__main__":
     # 配置参数
     DATA_PATH = "financial_data/sequences/sequences_252.pt"
     SAVE_DIR = "saved_models"
-    EPOCHS = 100
+    EPOCHS = 2000
     BATCH_SIZE = 64
     
     # 开始训练
