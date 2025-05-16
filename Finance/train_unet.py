@@ -349,7 +349,7 @@ def train_and_evaluate(
 if __name__ == "__main__":
     # 配置
     config = {
-        "data_path": "financial_data/sequences_252.pt",
+        "data_path": "financial_data/sequences/sequences_252.pt",
         "save_dir": "saved_models",
         "epochs": 1000,
         "batch_size": 64,
