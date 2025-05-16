@@ -72,7 +72,7 @@ class FinancialUNet(nn.Module):
         
         # 上采样路径
         self.up1 = nn.Sequential(
-            nn.Conv1d(128+64, 64, 3, padding=1),  # 跳连接增加了通道数
+            nn.Conv1d(128+64, 64, 3, padding=1),
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2),
             nn.Conv1d(64, 64, 3, padding=1),
@@ -80,7 +80,7 @@ class FinancialUNet(nn.Module):
             nn.LeakyReLU(0.2)
         )
         self.up2 = nn.Sequential(
-            nn.Conv1d(64+32, 32, 3, padding=1),  # 跳连接增加了通道数
+            nn.Conv1d(64+32, 32, 3, padding=1),
             nn.BatchNorm1d(32),
             nn.LeakyReLU(0.2),
             nn.Conv1d(32, 32, 3, padding=1),
@@ -117,26 +117,29 @@ class FinancialUNet(nn.Module):
         return self.output(x_up).squeeze(1)
 
 # ==================== 扩散过程 ====================
-class DiffusionProcess:
+class DiffusionProcess(nn.Module):  # 修改为继承自nn.Module
     def __init__(self, num_timesteps=200, device="cpu"):
+        super().__init__()  # 调用父类初始化
+        
         self.num_timesteps = num_timesteps
-        self.device = device
         
         # 余弦调度
         t = torch.linspace(0, 1, num_timesteps+1)
         s = 0.008
         f = torch.cos((t + s) / (1 + s) * torch.pi * 0.5) ** 2
-        self.betas = torch.clip(1 - (f[1:] / f[:-1]), 0, 0.999)
+        betas = torch.clip(1 - (f[1:] / f[:-1]), 0, 0.999)
         
-        self.alphas = 1. - self.betas
-        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
-        self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
-        self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
+        alphas = 1. - betas
+        alpha_bars = torch.cumprod(alphas, dim=0)
+        sqrt_alpha_bars = torch.sqrt(alpha_bars)
+        sqrt_one_minus_alpha_bars = torch.sqrt(1. - alpha_bars)
         
         # 注册缓冲区
-        for name, tensor in self.__dict__.items():
-            if torch.is_tensor(tensor):
-                self.register_buffer(name, tensor.to(device))
+        self.register_buffer('betas', betas.to(device))
+        self.register_buffer('alphas', alphas.to(device))
+        self.register_buffer('alpha_bars', alpha_bars.to(device))
+        self.register_buffer('sqrt_alpha_bars', sqrt_alpha_bars.to(device))
+        self.register_buffer('sqrt_one_minus_alpha_bars', sqrt_one_minus_alpha_bars.to(device))
     
     def add_noise(self, x0, t):
         noise = torch.randn_like(x0)
@@ -154,7 +157,7 @@ def train_and_save(data_path, save_dir="saved_models", epochs=100, batch_size=64
     # 创建保存目录
     os.makedirs(save_dir, exist_ok=True)
     
-    # 加载数据 - 完全适配您的数据结构
+    # 加载数据
     data = torch.load(data_path)
     sequences = data["sequences"].float()
     start_dates = data["start_dates"].float()
@@ -169,7 +172,7 @@ def train_and_save(data_path, save_dir="saved_models", epochs=100, batch_size=64
     
     # 初始化模型
     model = FinancialUNet(seq_len=252, cond_dim=4).to(device)
-    diffusion = DiffusionProcess(num_timesteps=200, device=device)
+    diffusion = DiffusionProcess(num_timesteps=200, device=device).to(device)  # 确保扩散模型也在正确设备上
     
     # 优化器
     optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
@@ -220,7 +223,7 @@ def train_and_save(data_path, save_dir="saved_models", epochs=100, batch_size=64
 # ==================== 主程序 ====================
 if __name__ == "__main__":
     # 配置参数
-    DATA_PATH = "financial_data/sequences/sequences_252.pt"  # 您的数据路径
+    DATA_PATH = "financial_data/sequences/sequences_252.pt"
     SAVE_DIR = "saved_models"
     EPOCHS = 100
     BATCH_SIZE = 64
