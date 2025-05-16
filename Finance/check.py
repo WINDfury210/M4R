@@ -26,7 +26,7 @@ class TimeEmbedding(nn.Module):
         half_dim = dim // 2
         emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
         self.register_buffer('emb', torch.exp(torch.arange(half_dim) * -emb))
-        self.proj = nn.Sequential(
+        self.time_mlp = nn.Sequential(
             nn.Linear(dim, dim),
             nn.LeakyReLU(0.2)
         )
@@ -34,7 +34,7 @@ class TimeEmbedding(nn.Module):
     def forward(self, time):
         emb = time[:, None] * self.emb[None, :]
         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
-        return self.proj(emb)
+        return self.time_mlp(emb)
 
 class FinancialUNet(nn.Module):
     def __init__(self, seq_len=252, cond_dim=4, time_dim=128):
@@ -49,6 +49,12 @@ class FinancialUNet(nn.Module):
             nn.Linear(cond_dim, time_dim),
             nn.LeakyReLU(0.2),
             nn.Linear(time_dim, time_dim)
+        )
+        
+        # 条件注入层
+        self.cond_mlp = nn.Sequential(
+            nn.Linear(time_dim, 32),
+            nn.LeakyReLU(0.2)
         )
         
         # 网络结构
@@ -104,16 +110,16 @@ class FinancialUNet(nn.Module):
         
         # 输出层
         self.output = nn.Conv1d(32, 1, 1)
-        
-        # 条件注入
-        self.cond_inject = nn.Linear(time_dim, 32)
 
     def forward(self, x, t, cond):
         x = x.unsqueeze(1)
         
         # 处理条件
-        t_emb = self.cond_inject(self.time_embed(t)).unsqueeze(-1)
-        c_emb = self.cond_inject(self.cond_proj(cond)).unsqueeze(-1)
+        t_emb = self.time_embed(t)
+        t_emb = self.cond_mlp(t_emb).unsqueeze(-1)
+        
+        c_emb = self.cond_proj(cond)
+        c_emb = self.cond_mlp(c_emb).unsqueeze(-1)
         
         # 初始卷积
         x = self.init_conv(x) + t_emb + c_emb
@@ -224,7 +230,7 @@ def calculate_metrics(real_data, generated_data):
         'temporal': {
             'acf_real': acf(real_np[0], nlags=20).tolist(),
             'acf_gen': acf(gen_np[0], nlags=20).tolist(),
-            'acf_mse': float(np.mean((acf(real_np[0], nlags=20) - acf(gen_np[0], nlags=20))**2)),
+            'acf_mse': float(np.mean((acf(real_np[0], nlags=20) - acf(gen_np[0], nlags=20)) ** 2)),
             'volatility_corr': float(np.corrcoef(
                 [np.std(real_np[:, i:i+20], axis=1).mean() for i in range(real_np.shape[1]-20)],
                 [np.std(gen_np[:, i:i+20], axis=1).mean() for i in range(gen_np.shape[1]-20)]
@@ -267,7 +273,15 @@ def main():
     print("Loading model...")
     model = FinancialUNet(seq_len=SEQUENCE_LENGTH, cond_dim=4).to(DEVICE)
     try:
-        model.load_state_dict(torch.load(MODEL_FILE, map_location=DEVICE), strict=True)
+        state_dict = torch.load(MODEL_FILE, map_location=DEVICE)
+        # 处理可能的键名不匹配
+        if 'time_mlp.0.weight' in state_dict:
+            state_dict['time_embed.time_mlp.0.weight'] = state_dict.pop('time_mlp.0.weight')
+            state_dict['time_embed.time_mlp.0.bias'] = state_dict.pop('time_mlp.0.bias')
+            state_dict['cond_mlp.0.weight'] = state_dict.pop('cond_mlp.0.weight')
+            state_dict['cond_mlp.0.bias'] = state_dict.pop('cond_mlp.0.bias')
+        
+        model.load_state_dict(state_dict, strict=True)
         print("Model loaded successfully!")
     except Exception as e:
         print(f"Error loading model: {str(e)}")
