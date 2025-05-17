@@ -36,7 +36,7 @@ class FinancialDiffusion(nn.Module):
     def __init__(
         self,
         seq_len: int = 252,
-        cond_dim: int = 256,
+        cond_dim: int = 4,
         time_dim: int = 256,
         channels: List[int] = [32, 64, 128, 256, 512],
         num_blocks: int = 2,
@@ -355,7 +355,7 @@ if __name__ == "__main__":
         "batch_size": 64,
         "model_config": {
             "seq_len": 252,
-            "cond_dim": 256,
+            "cond_dim": 4,
             "time_dim": 256,
             "channels": [32, 64, 128, 256, 512],  # 控制模型深度和宽度
             "num_blocks": 2,
