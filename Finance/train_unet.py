@@ -36,9 +36,9 @@ class FinancialDiffusion(nn.Module):
     def __init__(
         self,
         seq_len: int = 252,
-        cond_dim: int = 4,
-        time_dim: int = 128,
-        channels: List[int] = [32, 64, 128, 256],
+        cond_dim: int = 256,
+        time_dim: int = 256,
+        channels: List[int] = [32, 64, 128, 256, 512],
         num_blocks: int = 2,
         activation: str = "silu"
     ):
