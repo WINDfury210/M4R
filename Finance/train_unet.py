@@ -355,7 +355,7 @@ if __name__ == "__main__":
         "batch_size": 64,
         "model_config": {
             "seq_len": 252,
-            "cond_dim": 4,
+            "cond_dim": 256,
             "time_dim": 256,
             "channels": [32, 64, 128, 256, 512],  # 控制模型深度和宽度
             "num_blocks": 2,
