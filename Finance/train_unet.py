@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import numpy as np
 
 # 1. 扩散过程 ==========================================================
 class DiffusionProcess:
@@ -23,18 +22,23 @@ class DiffusionProcess:
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
-# 2. 条件UNet模型 ======================================================
+# 2. 时间嵌入 ==========================================================
 class TimeEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
+        self.dim = dim
         half_dim = dim // 2
         emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
-        self.register_buffer('emb', torch.exp(torch.arange(half_dim) * -emb))
+        emb = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -emb)
+        self.register_buffer('emb', emb)
         
     def forward(self, time):
-        emb = time * self.emb[None, :]
+        # 确保时间维度正确 [batch_size] -> [batch_size, dim]
+        time = time.float().view(-1, 1)  # [batch_size, 1]
+        emb = time * self.emb.view(1, -1)  # [batch_size, half_dim]
         return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
 
+# 3. 条件UNet模型 ======================================================
 class ConditionalUNet(nn.Module):
     def __init__(self, channels=[32, 64, 128, 256], time_dim=256):
         super().__init__()
@@ -49,7 +53,10 @@ class ConditionalUNet(nn.Module):
         
         # 输入层
         self.input_conv = nn.Conv1d(1, channels[0], 3, padding=1)
-        self.time_inject = nn.Linear(time_dim, channels[0])
+        self.time_inject = nn.Sequential(
+            nn.Linear(time_dim, channels[0]),
+            nn.SiLU()
+        )
         
         # 编码器
         self.encoder = nn.ModuleList()
@@ -93,13 +100,17 @@ class ConditionalUNet(nn.Module):
 
     def forward(self, x, t, date, market_cap):
         # 条件嵌入
-        t_emb = self.time_embed(t.float())
+        t_emb = self.time_embed(t)  # [batch_size, time_dim]
         cond = torch.cat([date, market_cap], dim=-1)
-        c_emb = self.cond_proj(cond)
+        c_emb = self.cond_proj(cond)  # [batch_size, time_dim]
         
         # 输入处理
-        x = x.unsqueeze(1)
-        h = self.input_conv(x) + self.time_inject(t_emb + c_emb).unsqueeze(-1)
+        x = x.unsqueeze(1)  # [batch_size, 1, seq_len]
+        h = self.input_conv(x)
+        
+        # 注入条件信息
+        cond_injection = self.time_inject(t_emb + c_emb).unsqueeze(-1)  # [batch_size, channels[0], 1]
+        h = h + cond_injection
         
         # 编码路径
         skips = []
@@ -147,10 +158,10 @@ def train():
     
     # 初始化组件
     diffusion = DiffusionProcess(num_timesteps=1000, device=device)
-    model = ConditionalUNet(channels=[32, 64, 128, 256, 512]).to(device)
+    model = ConditionalUNet(channels=[32, 64, 128, 256]).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=2e-4)
     
-    # 数据加载 - 使用您提供的正确路径
+    # 数据加载
     try:
         dataset = FinancialDataset("financial_data/sequences/sequences_252.pt")
         dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
@@ -162,7 +173,7 @@ def train():
     
     # 训练循环
     for epoch in range(1, 501):
-        for batch_idx, batch in enumerate(dataloader):
+        for batch in dataloader:
             x = batch["sequence"].to(device)
             date = batch["date"].to(device)
             market_cap = batch["market_cap"].to(device)
