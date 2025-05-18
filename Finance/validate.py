@@ -152,29 +152,77 @@ class FinancialDataset(Dataset):
 # 4. Validation Core ---------------------------------------------------------
 
 def generate_samples(model, diffusion, conditions, num_samples=100, steps=200, device="cuda"):
-    """Generate samples using DDIM sampling"""
+    """改进的样本生成函数"""
     with torch.no_grad():
-        # Prepare conditions
+        # 准备条件数据
         dates = conditions["date"].repeat(num_samples, 1).to(device)
         market_caps = conditions["market_cap"].repeat(num_samples, 1).to(device)
         
-        # Initialize noise
-        samples = torch.randn(num_samples, 252, device=device)
+        # 初始化噪声（缩小初始噪声规模）
+        samples = torch.randn(num_samples, 252, device=device) * 0.1
         
-        # Generation process
+        # 改进的生成过程
         for t in tqdm(reversed(range(0, diffusion.num_timesteps, diffusion.num_timesteps // steps)),
                      desc="Generating samples"):
             times = torch.full((num_samples,), t, device=device, dtype=torch.long)
             pred_noise = model(samples, times, dates, market_caps)
             
-            # DDIM update
+            # 添加噪声缩放系数
             alpha_bar = diffusion.alpha_bars[t]
             alpha_bar_prev = diffusion.alpha_bars[t-1] if t > 0 else torch.tensor(1.0)
             
-            samples = (samples - (1 - alpha_bar).sqrt() * pred_noise) / alpha_bar.sqrt()
-            samples = samples * alpha_bar_prev.sqrt() + (1 - alpha_bar_prev).sqrt() * pred_noise
+            # 更稳定的更新规则
+            x0_pred = (samples - (1 - alpha_bar).sqrt() * pred_noise) / alpha_bar.sqrt()
+            eps_coef = (1 - alpha_bar_prev) / (1 - alpha_bar)
+            eps_coef = torch.clamp(eps_coef, max=2.0)  # 限制系数范围
+            
+            samples = x0_pred * alpha_bar_prev.sqrt() + \
+                     eps_coef.sqrt() * pred_noise * (1 - alpha_bar_prev).sqrt()
         
+        # 后处理：裁剪异常值
+        samples = torch.clamp(samples, min=-3, max=3)
         return samples.cpu()
+
+def print_enhanced_report(metrics_dict, num_conditions):
+    """增强版统计报告"""
+    # 全局统计
+    print("\n=== 增强验证报告 ===")
+    print("\n[全局统计]")
+    print(f"{'指标':<15} | {'真实数据':>12} | {'生成数据':>12} | {'差异':>12} | {'Z-score':>10}")
+    print("-" * 70)
+    
+    global_stats = metrics_dict['global']
+    z_score_mean = (global_stats['gen_mean'] - global_stats['real_mean']) / global_stats['real_std']
+    z_score_std = (global_stats['gen_std'] - global_stats['real_std']) / global_stats['real_std']
+    
+    print(f"{'均值':<15} | {global_stats['real_mean']:>12.6f} | {global_stats['gen_mean']:>12.6f} | "
+          f"{abs(global_stats['gen_mean']-global_stats['real_mean']):>12.6f} | {z_score_mean:>10.2f}")
+    print(f"{'标准差':<15} | {global_stats['real_std']:>12.6f} | {global_stats['gen_std']:>12.6f} | "
+          f"{abs(global_stats['gen_std']-global_stats['real_std']):>12.6f} | {z_score_std:>10.2f}")
+    print(f"{'相关性':<15} | {global_stats['real_corr']:>12.6f} | {global_stats['gen_corr']:>12.6f} | "
+          f"{abs(global_stats['gen_corr']-global_stats['real_corr']):>12.6f} | {'-':>10}")
+    
+    # 条件统计
+    print("\n[条件统计 (前3个)]")
+    for i in range(min(3, num_conditions)):
+        cond_stats = metrics_dict[f'condition_{i}']
+        z_mean = (cond_stats['gen_mean'] - cond_stats['real_mean']) / cond_stats['real_std']
+        z_std = (cond_stats['gen_std'] - cond_stats['real_std']) / cond_stats['real_std']
+        
+        print(f"\n条件 {i+1}:")
+        print(f"{'均值':<15} | {cond_stats['real_mean']:>12.6f} | {cond_stats['gen_mean']:>12.6f} | "
+              f"{abs(cond_stats['gen_mean']-cond_stats['real_mean'])/cond_stats['real_mean']*100:>11.2f}% | {z_mean:>10.2f}")
+        print(f"{'标准差':<15} | {cond_stats['real_std']:>12.6f} | {cond_stats['gen_std']:>12.6f} | "
+              f"{abs(cond_stats['gen_std']-cond_stats['real_std'])/cond_stats['real_std']*100:>11.2f}% | {z_std:>10.2f}")
+    
+    # 问题诊断
+    print("\n[问题诊断]")
+    if global_stats['gen_std'] > global_stats['real_std'] * 1.5:
+        print("⚠️ 生成数据波动过大：建议检查噪声调度或降低初始噪声规模")
+    if abs(z_score_mean) > 3:
+        print("⚠️ 均值偏移显著：建议检查条件注入机制或模型偏差")
+    if global_stats['gen_corr'] < global_stats['real_corr'] * 0.5:
+        print("⚠️ 相关性不足：建议增加模型容量或调整训练目标")
 
 
 def calculate_metrics(real_data, generated_data):
@@ -331,7 +379,7 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
     metrics['global'] = calculate_metrics(real_all, gen_all)
     
     # Print and save results
-    print_comparison_report(metrics, num_conditions)
+    print_enhanced_report(metrics, num_conditions)
     save_visualizations(real_samples, gen_samples, metrics, output_dir)
     print(f"\nValidation complete! Results saved to {output_dir}")
 
