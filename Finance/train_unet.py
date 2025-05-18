@@ -253,7 +253,7 @@ if __name__ == "__main__":
         "channels": [32, 64, 128, 256, 512],
         "cond_dim": 128,
         "lr": 2e-4,
-        "data_path": "financial_data/sequences.pt",
+        "data_path": "financial_data/sequences/sequences_252.pt",
         "save_dir": "saved_models",
         "save_every": 200
     }
