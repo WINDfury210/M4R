@@ -33,30 +33,25 @@ class TimeEmbedding(nn.Module):
         self.register_buffer('emb', emb)
         
     def forward(self, time):
-        # 确保时间维度正确 [batch_size] -> [batch_size, dim]
-        time = time.float().view(-1, 1)  # [batch_size, 1]
-        emb = time * self.emb.view(1, -1)  # [batch_size, half_dim]
+        time = time.float().view(-1, 1)
+        emb = time * self.emb.view(1, -1)
         return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
 
 # 3. 条件UNet模型 ======================================================
 class ConditionalUNet(nn.Module):
-    def __init__(self, channels=[32, 64, 128, 256], time_dim=256):
+    def __init__(self, channels=[32, 64, 128], time_dim=128):
         super().__init__()
         self.time_embed = TimeEmbedding(time_dim)
         
         # 条件投影 (日期3维 + 市值1维)
         self.cond_proj = nn.Sequential(
-            nn.Linear(4, 128),
+            nn.Linear(4, time_dim),
             nn.SiLU(),
-            nn.Linear(128, time_dim)
+            nn.Linear(time_dim, time_dim)
         )
         
         # 输入层
         self.input_conv = nn.Conv1d(1, channels[0], 3, padding=1)
-        self.time_inject = nn.Sequential(
-            nn.Linear(time_dim, channels[0]),
-            nn.SiLU()
-        )
         
         # 编码器
         self.encoder = nn.ModuleList()
@@ -91,49 +86,57 @@ class ConditionalUNet(nn.Module):
             )
         
         # 输出层
-        self.output_conv = nn.Sequential(
-            nn.Conv1d(channels[0], channels[0], 3, padding=1),
-            nn.GroupNorm(8, channels[0]),
-            nn.SiLU(),
-            nn.Conv1d(channels[0], 1, 1)
-        )
+        self.output_conv = nn.Conv1d(channels[0], 1, 1)
+        
+        # 条件注入层
+        self.cond_inject = nn.ModuleList()
+        for ch in channels:
+            self.cond_inject.append(
+                nn.Sequential(
+                    nn.Linear(time_dim, ch),
+                    nn.SiLU()
+                )
+            )
 
     def forward(self, x, t, date, market_cap):
         # 条件嵌入
-        t_emb = self.time_embed(t)  # [batch_size, time_dim]
+        t_emb = self.time_embed(t)
         cond = torch.cat([date, market_cap], dim=-1)
-        c_emb = self.cond_proj(cond)  # [batch_size, time_dim]
+        c_emb = self.cond_proj(cond)
+        combined_cond = t_emb + c_emb
         
         # 输入处理
-        x = x.unsqueeze(1)  # [batch_size, 1, seq_len]
+        x = x.unsqueeze(1)
         h = self.input_conv(x)
-        
-        # 注入条件信息
-        cond_injection = self.time_inject(t_emb + c_emb).unsqueeze(-1)  # [batch_size, channels[0], 1]
-        h = h + cond_injection
         
         # 编码路径
         skips = []
-        for block in self.encoder:
+        for i, block in enumerate(self.encoder):
+            # 注入条件信息
+            cond_feat = self.cond_inject[i](combined_cond).unsqueeze(-1)
+            h = h + cond_feat
             h = block(h)
             skips.append(h)
         
         # 中间层
         h = self.mid_conv(h)
         
-        # 解码路径 (带跳连)
-        for block in self.decoder:
+        # 解码路径
+        for i, block in enumerate(self.decoder):
+            # 注入条件信息
+            cond_feat = self.cond_inject[len(self.decoder)-1-i](combined_cond).unsqueeze(-1)
+            h = h + cond_feat
+            
+            # 跳连拼接
+            skip = skips.pop()
+            if h.shape[-1] != skip.shape[-1]:
+                h = nn.functional.interpolate(h, size=skip.shape[-1], mode='linear')
+            h = torch.cat([h, skip], dim=1)
             h = block(h)
-            if skips:  # 添加跳连
-                skip = skips.pop()
-                # 确保尺寸匹配
-                if h.shape[-1] != skip.shape[-1]:
-                    h = nn.functional.interpolate(h, size=skip.shape[-1], mode='linear')
-                h = h + skip
         
         return self.output_conv(h).squeeze(1)
 
-# 3. 数据加载 ==========================================================
+# 4. 数据加载 ==========================================================
 class FinancialDataset(Dataset):
     def __init__(self, data_path):
         data = torch.load(data_path)
@@ -151,14 +154,14 @@ class FinancialDataset(Dataset):
             "market_cap": self.market_caps[idx]
         }
 
-# 4. 训练函数 ==========================================================
+# 5. 训练函数 ==========================================================
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # 初始化组件
     diffusion = DiffusionProcess(num_timesteps=1000, device=device)
-    model = ConditionalUNet(channels=[32, 64, 128, 256]).to(device)
+    model = ConditionalUNet(channels=[32, 64, 128]).to(device)  # 简化模型结构
     optimizer = optim.AdamW(model.parameters(), lr=2e-4)
     
     # 数据加载
@@ -172,7 +175,7 @@ def train():
         return
     
     # 训练循环
-    for epoch in range(1, 501):
+    for epoch in range(1, 101):  # 减少epoch数量便于测试
         for batch in dataloader:
             x = batch["sequence"].to(device)
             date = batch["date"].to(device)
@@ -190,7 +193,7 @@ def train():
             loss.backward()
             optimizer.step()
         
-        if epoch % 50 == 0:
+        if epoch % 10 == 0:
             print(f"Epoch {epoch} | Loss: {loss.item():.6f}")
     
     torch.save(model.state_dict(), "conditional_diffusion.pth")
