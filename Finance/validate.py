@@ -265,53 +265,130 @@ def save_results(real_samples, generated_samples, stats, output_dir):
     plt.close()
 
 
+
+def print_detailed_stats(stats, num_test_conditions):
+    """打印详细的统计指标对比"""
+    print("\n=== Detailed Statistics Comparison ===")
+    
+    # 打印全局统计
+    print("\n[Global Statistics]")
+    print(f"{'Metric':<15} | {'Real Data':>12} | {'Generated Data':>12} | {'Difference':>12}")
+    print("-" * 60)
+    for metric in ['mean', 'std', 'corr_mean']:
+        real_val = stats['all'][f'real_{metric}']
+        gen_val = stats['all'][f'generated_{metric}']
+        diff = abs(real_val - gen_val)
+        print(f"{metric:<15} | {real_val:>12.4f} | {gen_val:>12.4f} | {diff:>12.4f}")
+    print(f"\nKL Divergence: {stats['all']['hist_kl']:.4f}")
+
+    # 打印各条件统计
+    for i in range(num_test_conditions):
+        cond_stats = stats[f'condition_{i}']
+        print(f"\n[Condition {i+1} Statistics]")
+        print(f"{'Metric':<15} | {'Real':>12} | {'Generated':>12} | {'Diff %':>10}")
+        print("-" * 60)
+        for metric in ['mean', 'std']:
+            real_val = cond_stats[f'real_{metric}']
+            gen_val = cond_stats[f'generated_{metric}']
+            diff_pct = abs(real_val - gen_val) / real_val * 100
+            print(f"{metric:<15} | {real_val:>12.4f} | {gen_val:>12.4f} | {diff_pct:>9.2f}%")
+        
+        # 打印相关性差异
+        real_corr = cond_stats['real_corr_mean']
+        gen_corr = cond_stats['generated_corr_mean']
+        corr_diff = abs(real_corr - gen_corr)
+        print(f"{'correlation':<15} | {real_corr:>12.4f} | {gen_corr:>12.4f} | {corr_diff:>12.4f}")
+
+    # 打印全局总结
+    print("\n=== Summary ===")
+    mean_diffs = []
+    std_diffs = []
+    for i in range(num_test_conditions):
+        cond_stats = stats[f'condition_{i}']
+        mean_diffs.append(abs(cond_stats['real_mean'] - cond_stats['generated_mean']))
+        std_diffs.append(abs(cond_stats['real_std'] - cond_stats['generated_std']))
+    
+    print(f"Average mean difference: {np.mean(mean_diffs):.4f}")
+    print(f"Average std difference: {np.mean(std_diffs):.4f}")
+    print(f"Global KL divergence: {stats['all']['hist_kl']:.4f}")
+
+
 def validate(model_path, data_path, num_test_conditions=5, samples_per_cond=100, output_dir="validation_results"):
-    """Main validation workflow."""
+    """Main validation workflow with enhanced reporting"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Initialize components
+    # 初始化组件
     diffusion = DiffusionProcess(device=device)
     model, dataloader = load_model_and_data(model_path, data_path, device)
     
-    # Get test conditions
+    # 准备测试条件
     all_data = next(iter(dataloader))
     cond_indices = torch.randperm(len(all_data["date"]))[:num_test_conditions]
     
-    # Storage for results
+    # 存储结果
     all_stats = {}
     real_samples = []
     generated_samples = []
     
-    # Get global real data
+    # 收集全局真实数据
     real_all = torch.cat([batch["sequence"] for batch in dataloader], dim=0)
+    all_stats['real_all'] = {
+        'mean': real_all.mean().item(),
+        'std': real_all.std().item(),
+        'corr_mean': np.abs(np.corrcoef(real_all.numpy())).mean()
+    }
     
-    # Generate and compare samples
+    # 对每个测试条件进行处理
     for i, idx in enumerate(cond_indices):
         condition = {
             "date": all_data["date"][idx].unsqueeze(0),
             "market_cap": all_data["market_cap"][idx].unsqueeze(0)
         }
         
-        # Generate samples
+        # 获取真实数据
+        real_data = all_data["sequence"][idx].unsqueeze(0)
+        real_stats = {
+            'mean': real_data.mean().item(),
+            'std': real_data.std().item(),
+            'corr_mean': np.abs(np.corrcoef(real_data.numpy())).mean()
+        }
+        
+        # 生成样本
         gen_data = generate_samples(
             model, diffusion, condition, 
             num_samples=samples_per_cond,
             device=device
         )
         
-        # Get corresponding real samples
-        real_data = all_data["sequence"][idx].unsqueeze(0)
+        # 计算统计量
+        gen_stats = {
+            'mean': gen_data.mean().item(),
+            'std': gen_data.std().item(),
+            'corr_mean': np.abs(np.corrcoef(gen_data.numpy())).mean()
+        }
         
-        # Calculate statistics
-        cond_stats = calculate_statistics(real_data, gen_data)
-        all_stats[f'condition_{i}'] = cond_stats
+        # 计算KL散度
+        real_hist = np.histogram(real_data.numpy(), bins=50, density=True)[0]
+        gen_hist = np.histogram(gen_data.numpy(), bins=50, density=True)[0]
+        kl_div = F.kl_div(
+            torch.from_numpy(gen_hist).log(), 
+            torch.from_numpy(real_hist), 
+            reduction='batchmean'
+        ).item()
         
-        # Store samples for visualization
+        # 存储条件统计
+        all_stats[f'condition_{i}'] = {
+            'real': real_stats,
+            'generated': gen_stats,
+            'kl_divergence': kl_div
+        }
+        
+        # 存储示例样本
         if i < 3:
             real_samples.append(real_data.squeeze())
             generated_samples.append(gen_data[0])
     
-    # Calculate global statistics
+    # 计算全局生成数据统计
     gen_all = torch.cat([
         generate_samples(
             model, diffusion, 
@@ -321,17 +398,26 @@ def validate(model_path, data_path, num_test_conditions=5, samples_per_cond=100,
             device=device
         ) for i in cond_indices
     ])
-    all_stats['all'] = calculate_statistics(real_all, gen_all)
     
-    # Print key statistics
-    print("\n=== Key Statistics ===")
-    print(f"Real data mean: {all_stats['all']['real_mean']:.4f}")
-    print(f"Generated data mean: {all_stats['all']['generated_mean']:.4f}")
-    print(f"Real data std: {all_stats['all']['real_std']:.4f}")
-    print(f"Generated data std: {all_stats['all']['generated_std']:.4f}")
-    print(f"KL divergence: {all_stats['all']['hist_kl']:.4f}")
+    all_stats['generated_all'] = {
+        'mean': gen_all.mean().item(),
+        'std': gen_all.std().item(),
+        'corr_mean': np.abs(np.corrcoef(gen_all.numpy())).mean()
+    }
     
-    # Save results
+    # 计算全局KL散度
+    real_hist_all = np.histogram(real_all.numpy(), bins=50, density=True)[0]
+    gen_hist_all = np.histogram(gen_all.numpy(), bins=50, density=True)[0]
+    all_stats['global_kl_divergence'] = F.kl_div(
+        torch.from_numpy(gen_hist_all).log(), 
+        torch.from_numpy(real_hist_all), 
+        reduction='batchmean'
+    ).item()
+    
+    # 打印详细统计
+    print_detailed_stats(all_stats, num_test_conditions)
+    
+    # 保存结果
     save_results(real_samples, generated_samples, all_stats, output_dir)
     print(f"\nValidation complete! Results saved to {output_dir}")
 
