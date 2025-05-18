@@ -283,8 +283,8 @@ if __name__ == "__main__":
     train(
         num_epochs=1000,
         num_timesteps=2000,
-        base_channels=32,
-        channel_mults=(1, 2, 4, 4),  # 改为3层UNet更稳定
+        base_channels=64,
+        channel_mults=(1, 2, 4),  # 改为3层UNet更稳定
         num_res_blocks=2,
         lr=2e-4
     )
