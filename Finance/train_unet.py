@@ -1,182 +1,182 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import numpy as np
-from typing import Tuple
+from tqdm import tqdm
+import os
 
-# 1. 扩散过程 ==========================================================
+# ===================== 1. 扩散过程 =====================
 class DiffusionProcess:
-    def __init__(self, num_timesteps: int = 1000, device: str = "cpu"):
+    def __init__(self, num_timesteps=1000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         
-        # 线性噪声调度
-        self.betas = torch.linspace(1e-4, 0.02, num_timesteps, device=device)
+        # 余弦噪声调度
+        self.betas = self._cosine_beta_schedule().to(device)
         self.alphas = 1. - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
     
-    def add_noise(self, x0: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _cosine_beta_schedule(self, s=0.008):
+        steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32)
+        f = torch.cos(((steps / self.num_timesteps + s) / (1 + s)) * torch.pi / 2) ** 2
+        return torch.clip(1 - f[1:] / f[:-1], 0, 0.999)
+    
+    def add_noise(self, x0, t):
         noise = torch.randn_like(x0, device=self.device)
         sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
-# 2. 时间嵌入 ==========================================================
+# ===================== 2. 网络结构 =====================
 class TimeEmbedding(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, dim):
         super().__init__()
-        self.dim = dim
         half_dim = dim // 2
         emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
         emb = torch.exp(torch.arange(half_dim) * -emb)
         self.register_buffer('emb', emb)
-        
-    def forward(self, time: torch.Tensor) -> torch.Tensor:
-        emb = time.float().view(-1, 1) * self.emb.view(1, -1)
-        return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+        self.proj = nn.Linear(dim, dim)
 
-# 3. 条件UNet模型 ======================================================
+    def forward(self, time):
+        emb = time.float()[:, None] * self.emb[None, :]
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+        return self.proj(emb)
+
+class CondBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, cond_dim=None, downsample=False):
+        super().__init__()
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=3, 
+                             stride=2 if downsample else 1, 
+                             padding=1)
+        self.norm = nn.GroupNorm(8, out_ch)
+        self.act = nn.SiLU()
+        self.cond_proj = nn.Linear(cond_dim, out_ch) if cond_dim else None
+
+    def forward(self, x, cond=None):
+        x = self.conv(x)
+        x = self.norm(x)
+        if self.cond_proj and cond is not None:
+            x = x + self.cond_proj(cond).unsqueeze(-1)
+        return self.act(x)
+
 class ConditionalUNet(nn.Module):
-    def __init__(self, seq_len: int = 252):
+    def __init__(self, seq_len=252, channels=[32, 64, 128], cond_dim=128):
         super().__init__()
         self.seq_len = seq_len
+        self.cond_dim = cond_dim
         
-        # 时间/条件嵌入
-        self.time_embed = TimeEmbedding(128)
-        self.cond_proj = nn.Sequential(
-            nn.Linear(4, 128),  # date(3) + market_cap(1)
-            nn.SiLU(),
-            nn.Linear(128, 128)
-        )
-        
-        # 输入层 [B,1,252]
-        self.input_conv = nn.Conv1d(1, 32, kernel_size=3, padding=1)
-        
-        # 下采样路径
-        self.down1 = nn.Sequential(
-            nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1),  # [B,64,126]
-            nn.GroupNorm(8, 64),
-            nn.SiLU()
-        )
-        self.down2 = nn.Sequential(
-            nn.Conv1d(64, 128, kernel_size=3, stride=2, padding=1),  # [B,128,63]
-            nn.GroupNorm(8, 128),
-            nn.SiLU()
-        )
-        
-        # 中间层 [B,128,63]
-        self.mid_conv = nn.Sequential(
-            nn.Conv1d(128, 128, kernel_size=3, padding=1),
-            nn.GroupNorm(8, 128),
-            nn.SiLU()
-        )
-        
-        # 上采样路径
-        self.up1 = nn.Sequential(
-            nn.ConvTranspose1d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),  # [B,64,126]
-            nn.GroupNorm(8, 64),
-            nn.SiLU()
-        )
-        self.up2 = nn.Sequential(
-            nn.ConvTranspose1d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),  # [B,32,252]
-            nn.GroupNorm(8, 32),
-            nn.SiLU()
-        )
-        
-        # 输出层 [B,32,252] -> [B,1,252]
-        self.output_conv = nn.Conv1d(32, 1, kernel_size=1)
-        
-        # 条件注入层（每层独立）
-        self.cond_inject_input = nn.Linear(128, 32)
-        self.cond_inject_down1 = nn.Linear(128, 64)
-        self.cond_inject_down2 = nn.Linear(128, 128)
-        self.cond_inject_mid = nn.Linear(128, 128)
-
-    def forward(self, x: torch.Tensor, t: torch.Tensor, date: torch.Tensor, market_cap: torch.Tensor) -> torch.Tensor:
         # 条件嵌入
-        t_emb = self.time_embed(t)  # [B,128]
-        cond = torch.cat([date, market_cap], dim=-1)  # [B,4]
-        c_emb = self.cond_proj(cond)  # [B,128]
-        combined_cond = t_emb + c_emb  # [B,128]
+        self.time_embed = TimeEmbedding(cond_dim)
+        self.cond_proj = nn.Sequential(
+            nn.Linear(4, cond_dim),  # date(3) + market_cap(1)
+            nn.SiLU(),
+            nn.Linear(cond_dim, cond_dim)
+        )
         
-        # 输入处理 [B,1,252]
-        x = x.unsqueeze(1)  # 确保输入是3D张量
-        h0 = self.input_conv(x)
-        
-        # 下采样路径 + 条件注入
-        h0 = h0 + self.cond_inject_input(combined_cond).unsqueeze(-1)
-        h1 = self.down1(h0)
-        h1 = h1 + self.cond_inject_down1(combined_cond).unsqueeze(-1)
-        h2 = self.down2(h1)
-        h2 = h2 + self.cond_inject_down2(combined_cond).unsqueeze(-1)
+        # 编码器
+        self.encoder = nn.ModuleList([
+            CondBlock(1, channels[0], cond_dim, downsample=True),
+            CondBlock(channels[0], channels[1], cond_dim, downsample=True),
+            CondBlock(channels[1], channels[2], cond_dim, downsample=False)
+        ])
         
         # 中间层
-        h_mid = self.mid_conv(h2)
-        h_mid = h_mid + self.cond_inject_mid(combined_cond).unsqueeze(-1)
+        self.mid_conv1 = CondBlock(channels[-1], channels[-1], cond_dim)
+        self.mid_conv2 = CondBlock(channels[-1], channels[-1], cond_dim)
         
-        # 上采样路径 + 跳连
-        h_up1 = self.up1(h_mid)
-        h_up1 = h_up1 + h1  # 跳连
-        h_up2 = self.up2(h_up1)
-        h_up2 = h_up2 + h0  # 跳连
+        # 解码器
+        self.decoder = nn.ModuleList([
+            nn.Sequential(
+                nn.ConvTranspose1d(channels[2], channels[1], 3, stride=2, padding=1, output_padding=1),
+                nn.GroupNorm(8, channels[1]),
+                nn.SiLU()
+            ),
+            CondBlock(channels[1]*2, channels[1], cond_dim),
+            nn.Sequential(
+                nn.ConvTranspose1d(channels[1], channels[0], 3, stride=2, padding=1, output_padding=1),
+                nn.GroupNorm(8, channels[0]),
+                nn.SiLU()
+            ),
+            CondBlock(channels[0]*2, channels[0], cond_dim)
+        ])
         
-        # 输出处理
-        out = self.output_conv(h_up2)
-        return out.squeeze(1)  # [B,252]
+        # 输出层
+        self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
 
-# 4. 数据加载 ==========================================================
-class FinancialDataset(Dataset):
-    def __init__(self, data_path: str):
-        data = torch.load(data_path)
-        self.sequences = data["sequences"]      # [N,252]
-        self.dates = data["start_dates"]        # [N,3]
-        self.market_caps = data["market_caps"]  # [N,1]
+    def forward(self, x, t, date, market_cap):
+        # 条件嵌入
+        time_emb = self.time_embed(t)
+        cond = torch.cat([date, market_cap], dim=-1)
+        cond_emb = self.cond_proj(cond)
+        combined_cond = time_emb + cond_emb
         
-    def __len__(self) -> int:
+        # 编码器
+        x = x.unsqueeze(1)
+        skip1 = self.encoder[0](x, combined_cond)
+        skip2 = self.encoder[1](skip1, combined_cond)
+        x = self.encoder[2](skip2, combined_cond)
+        
+        # 中间层
+        x = self.mid_conv1(x, combined_cond)
+        x = self.mid_conv2(x, combined_cond)
+        
+        # 解码器
+        x = self.decoder[0](x)
+        x = torch.cat([x, skip2], dim=1)
+        x = self.decoder[1](x, combined_cond)
+        
+        x = self.decoder[2](x)
+        x = torch.cat([x, skip1], dim=1)
+        x = self.decoder[3](x, combined_cond)
+        
+        # 输出
+        return self.final_conv(x).squeeze(1)
+
+# ===================== 3. 数据加载 =====================
+class FinancialDataset(Dataset):
+    def __init__(self, data_path):
+        data = torch.load(data_path)
+        self.sequences = data["sequences"]
+        self.dates = data["start_dates"]
+        self.market_caps = data["market_caps"]
+        
+    def __len__(self):
         return len(self.sequences)
     
-    def __getitem__(self, idx: int) -> dict:
+    def __getitem__(self, idx):
         return {
             "sequence": self.sequences[idx],
             "date": self.dates[idx],
             "market_cap": self.market_caps[idx]
         }
 
-# 5. 训练函数 ==========================================================
-def train(num_epochs, num_timesteps):
+# ===================== 4. 训练流程 =====================
+def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
     
     # 初始化组件
-    diffusion = DiffusionProcess(num_timesteps=num_timesteps, device=device)
-    model = ConditionalUNet(seq_len=252).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
+    diffusion = DiffusionProcess(num_timesteps=config["num_timesteps"], device=device)
+    model = ConditionalUNet(
+        seq_len=config["seq_len"],
+        channels=config["channels"],
+        cond_dim=config["cond_dim"]
+    ).to(device)
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["num_epochs"])
     
     # 数据加载
-    dataset = FinancialDataset("financial_data/sequences/sequences_252.pt")
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=4)
-    print(f"Loaded dataset with {len(dataset)} samples")
-    
-    # 模型结构验证
-    test_input = torch.randn(2, 252, device=device)
-    test_t = torch.randint(0, 1000, (2,), device=device)
-    test_date = torch.randn(2, 3, device=device)
-    test_mcap = torch.randn(2, 1, device=device)
-    test_output = model(test_input, test_t, test_date, test_mcap)
-    assert test_output.shape == test_input.shape, \
-        f"Shape mismatch: input {test_input.shape}, output {test_output.shape}"
-    print("Model structure validated!")
+    dataset = FinancialDataset(config["data_path"])
+    dataloader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True)
     
     # 训练循环
-    for epoch in range(1, num_epochs+1):
+    for epoch in range(1, config["num_epochs"] + 1):
         model.train()
         epoch_loss = 0.0
         
-        for batch in dataloader:
+        for batch in tqdm(dataloader, desc=f"Epoch {epoch}/{config['num_epochs']}"):
             x = batch["sequence"].to(device)
             date = batch["date"].to(device)
             market_cap = batch["market_cap"].to(device)
@@ -191,23 +191,85 @@ def train(num_epochs, num_timesteps):
             loss = F.mse_loss(pred_noise, noise)
             loss.backward()
             
-            # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            
             optimizer.step()
             epoch_loss += loss.item()
         
+        scheduler.step()
+        
         # 打印统计信息
-        avg_loss = epoch_loss / len(dataloader)
-        if epoch % 10 == 0:
-            print(f"Epoch {epoch:03d} | Loss: {avg_loss:.6f}")
+        if epoch % 10 == 0 or epoch == 1:
+            print(f"Epoch {epoch:04d} | Loss: {epoch_loss/len(dataloader):.6f} | LR: {scheduler.get_last_lr()[0]:.2e}")
+        
+        # 保存模型
+        if epoch % config["save_every"] == 0:
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch': epoch,
+                'loss': epoch_loss/len(dataloader)
+            }, os.path.join(config["save_dir"], f"model_epoch_{epoch}.pth"))
     
-    # 保存模型
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-    }, "conditional_diffusion_final.pth")
-    print("Training completed and model saved")
+    # 保存最终模型
+    torch.save(model.state_dict(), os.path.join(config["save_dir"], "final_model.pth"))
+    print(f"Training completed. Models saved to {config['save_dir']}")
 
+# ===================== 5. 生成样本 =====================
+def generate_samples(model, diffusion, conditions, num_samples=100, steps=200, device="cuda"):
+    model.eval()
+    with torch.no_grad():
+        # 准备条件数据
+        dates = conditions["date"].repeat(num_samples, 1).to(device)
+        market_caps = conditions["market_cap"].repeat(num_samples, 1).to(device)
+        
+        # 初始化噪声
+        samples = torch.randn(num_samples, model.seq_len, device=device) * 0.1
+        
+        # 逐步去噪
+        for t in tqdm(reversed(range(0, diffusion.num_timesteps, diffusion.num_timesteps // steps)), 
+                      desc="Generating samples"):
+            times = torch.full((num_samples,), t, device=device, dtype=torch.long)
+            pred_noise = model(samples, times, dates, market_caps)
+            
+            alpha_bar = diffusion.alpha_bars[t]
+            alpha_bar_prev = diffusion.alpha_bars[t-1] if t > 0 else torch.tensor(1.0)
+            
+            x0_pred = (samples - (1 - alpha_bar).sqrt() * pred_noise) / alpha_bar.sqrt()
+            eps_coef = (1 - alpha_bar_prev) / (1 - alpha_bar)
+            eps_coef = torch.clamp(eps_coef, max=2.0)
+            
+            samples = x0_pred * alpha_bar_prev.sqrt() + \
+                     eps_coef.sqrt() * pred_noise * (1 - alpha_bar_prev).sqrt()
+        
+        return samples.cpu()
+
+# ===================== 主程序 =====================
 if __name__ == "__main__":
-    train(1000, 2000)
+    config = {
+        "num_epochs": 1000,
+        "num_timesteps": 2000,
+        "batch_size": 64,
+        "seq_len": 252,
+        "channels": [32, 64, 128, 256, 512],
+        "cond_dim": 128,
+        "lr": 2e-4,
+        "data_path": "financial_data/sequences.pt",
+        "save_dir": "saved_models",
+        "save_every": 200
+    }
+    
+    # 训练模型
+    train_model(config)
+    
+    # 示例生成
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = ConditionalUNet(seq_len=252, channels=[32, 64, 128]).to(device)
+    model.load_state_dict(torch.load("saved_models/final_model.pth"))
+    
+    diffusion = DiffusionProcess(device=device)
+    test_conditions = {
+        "date": torch.randn(1, 3),
+        "market_cap": torch.randn(1, 1)
+    }
+    generated = generate_samples(model, diffusion, test_conditions)
+    print(f"Generated samples shape: {generated.shape}")
