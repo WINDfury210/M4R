@@ -326,7 +326,7 @@ def train(
 if __name__ == "__main__":
     # 示例配置
     train(
-        num_epochs=500,
+        num_epochs=1000,
         num_timesteps=2000,
         base_channels=32,
         channel_mults=(1, 2, 4, 8),  # 4层UNet
