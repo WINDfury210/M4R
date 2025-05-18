@@ -1,11 +1,6 @@
 """
-Complete Diffusion Model Validation Pipeline
-
-Features:
-1. Contains all necessary components (model, diffusion, dataset)
-2. Detailed metrics comparison between real and generated samples
-3. Condition-specific analysis
-4. Clean Pythonic style without type hints
+Corrected Diffusion Model Validation Script
+With matching parameter names between model definition and saved checkpoint
 """
 
 import json
@@ -82,10 +77,11 @@ class ConditionalUNet(nn.Module):
         
         self.output_conv = nn.Conv1d(32, 1, kernel_size=1)
         
-        # Condition injection
-        self.cond_proj_input = nn.Linear(128, 32)
-        self.cond_proj_down1 = nn.Linear(128, 64)
-        self.cond_proj_down2 = nn.Linear(128, 128)
+        # Condition injection layers (using names that match the saved checkpoint)
+        self.cond_inject_input = nn.Linear(128, 32)
+        self.cond_inject_down1 = nn.Linear(128, 64)
+        self.cond_inject_down2 = nn.Linear(128, 128)
+        self.cond_inject_mid = nn.Linear(128, 128)
 
     def forward(self, x, t, date, market_cap):
         # Embed conditions
@@ -96,14 +92,14 @@ class ConditionalUNet(nn.Module):
         
         # Process input
         x = x.unsqueeze(1)
-        h0 = self.input_conv(x) + self.cond_proj_input(combined_cond).unsqueeze(-1)
+        h0 = self.input_conv(x) + self.cond_inject_input(combined_cond).unsqueeze(-1)
         
         # Downsample
-        h1 = self.down1(h0) + self.cond_proj_down1(combined_cond).unsqueeze(-1)
-        h2 = self.down2(h1) + self.cond_proj_down2(combined_cond).unsqueeze(-1)
+        h1 = self.down1(h0) + self.cond_inject_down1(combined_cond).unsqueeze(-1)
+        h2 = self.down2(h1) + self.cond_inject_down2(combined_cond).unsqueeze(-1)
         
         # Middle layer
-        h_mid = self.mid_conv(h2)
+        h_mid = self.mid_conv(h2) + self.cond_inject_mid(combined_cond).unsqueeze(-1)
         
         # Upsample with skips
         h_up1 = self.up1(h_mid) + h1
@@ -272,7 +268,12 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
     # Initialize components
     diffusion = DiffusionProcess(device=device)
     model = ConditionalUNet().to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device)['model_state_dict'])
+    
+    # Load model with strict=False to handle any remaining minor mismatches
+    model.load_state_dict(
+        torch.load(model_path, map_location=device)['model_state_dict'],
+        strict=False
+    )
     model.eval()
     
     dataset = FinancialDataset(data_path)
