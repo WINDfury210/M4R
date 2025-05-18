@@ -118,11 +118,11 @@ def train():
     
     # 初始化组件
     diffusion = DiffusionProcess(num_timesteps=1000, device=device)
-    model = ConditionalUNet(channels=[32, 64, 128, 256]).to(device)
+    model = ConditionalUNet(channels=[32, 64, 128, 256, 512]).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=2e-4)
     
     # 数据加载
-    dataset = FinancialDataset("financial_data/sequences_252.pt")
+    dataset = FinancialDataset("financial_data/sequences/sequences_252.pt")
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True)
     
     # 训练循环
