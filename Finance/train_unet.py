@@ -33,6 +33,7 @@ class TimeEmbedding(nn.Module):
         self.register_buffer('emb', emb)
         
     def forward(self, time):
+        # 输入: [batch_size] -> 输出: [batch_size, dim]
         time = time.float().view(-1, 1)
         emb = time * self.emb.view(1, -1)
         return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
@@ -41,6 +42,7 @@ class TimeEmbedding(nn.Module):
 class ConditionalUNet(nn.Module):
     def __init__(self, channels=[32, 64, 128], time_dim=128):
         super().__init__()
+        self.channels = channels
         self.time_embed = TimeEmbedding(time_dim)
         
         # 条件投影 (日期3维 + 市值1维)
@@ -50,12 +52,13 @@ class ConditionalUNet(nn.Module):
             nn.Linear(time_dim, time_dim)
         )
         
-        # 输入层
+        # 输入层 [B,1,252] -> [B,32,252]
         self.input_conv = nn.Conv1d(1, channels[0], 3, padding=1)
         
         # 编码器
         self.encoder = nn.ModuleList()
         for i in range(len(channels)-1):
+            # 每层下采样: [B,C,T] -> [B,C_next,T//2]
             self.encoder.append(
                 nn.Sequential(
                     nn.Conv1d(channels[i], channels[i+1], 3, stride=2, padding=1),
@@ -64,7 +67,7 @@ class ConditionalUNet(nn.Module):
                 )
             )
         
-        # 中间层
+        # 中间层 [B,128,63] -> [B,128,63]
         self.mid_conv = nn.Sequential(
             nn.Conv1d(channels[-1], channels[-1], 3, padding=1),
             nn.GroupNorm(8, channels[-1]),
@@ -74,6 +77,7 @@ class ConditionalUNet(nn.Module):
         # 解码器
         self.decoder = nn.ModuleList()
         for i in reversed(range(len(channels)-1)):
+            # 每层上采样: [B,C,T] -> [B,C_prev,T*2]
             self.decoder.append(
                 nn.Sequential(
                     nn.ConvTranspose1d(
@@ -85,13 +89,13 @@ class ConditionalUNet(nn.Module):
                 )
             )
         
-        # 输出层
+        # 输出层 [B,32,252] -> [B,1,252]
         self.output_conv = nn.Conv1d(channels[0], 1, 1)
         
-        # 条件注入层
-        self.cond_inject = nn.ModuleList()
+        # 条件注入层 (每层独立)
+        self.cond_layers = nn.ModuleList()
         for ch in channels:
-            self.cond_inject.append(
+            self.cond_layers.append(
                 nn.Sequential(
                     nn.Linear(time_dim, ch),
                     nn.SiLU()
@@ -99,39 +103,45 @@ class ConditionalUNet(nn.Module):
             )
 
     def forward(self, x, t, date, market_cap):
-        # 条件嵌入
+        # 输入x: [B,252]
+        # 时间嵌入: [B] -> [B,time_dim]
         t_emb = self.time_embed(t)
+        
+        # 条件嵌入: [B,3+1] -> [B,time_dim]
         cond = torch.cat([date, market_cap], dim=-1)
         c_emb = self.cond_proj(cond)
+        
+        # 合并条件: [B,time_dim]
         combined_cond = t_emb + c_emb
         
-        # 输入处理
+        # 输入处理: [B,1,252]
         x = x.unsqueeze(1)
         h = self.input_conv(x)
         
         # 编码路径
         skips = []
         for i, block in enumerate(self.encoder):
-            # 注入条件信息
-            cond_feat = self.cond_inject[i](combined_cond).unsqueeze(-1)
-            h = h + cond_feat
-            h = block(h)
-            skips.append(h)
-        
+            # 注入条件: [B,ch] -> [B,ch,1]
+            cond_feat = self.cond_layers[i](combined_cond).unsqueeze(-1)
+            h = h + cond_feat  # [B,ch,T] + [B,ch,1]
+            h = block(h)       # [B,ch_next,T//2]
+            skips.append(h)     # 保存跳连
+            
         # 中间层
         h = self.mid_conv(h)
         
         # 解码路径
         for i, block in enumerate(self.decoder):
-            # 注入条件信息
-            cond_feat = self.cond_inject[len(self.decoder)-1-i](combined_cond).unsqueeze(-1)
+            # 注入条件 (反向对应)
+            cond_idx = len(self.channels)-2 - i
+            cond_feat = self.cond_layers[cond_idx](combined_cond).unsqueeze(-1)
             h = h + cond_feat
             
-            # 跳连拼接
+            # 上采样前处理跳连
             skip = skips.pop()
             if h.shape[-1] != skip.shape[-1]:
                 h = nn.functional.interpolate(h, size=skip.shape[-1], mode='linear')
-            h = torch.cat([h, skip], dim=1)
+            h = torch.cat([h, skip], dim=1)  # 拼接通道维度
             h = block(h)
         
         return self.output_conv(h).squeeze(1)
@@ -140,9 +150,9 @@ class ConditionalUNet(nn.Module):
 class FinancialDataset(Dataset):
     def __init__(self, data_path):
         data = torch.load(data_path)
-        self.sequences = data["sequences"]
-        self.dates = data["start_dates"]
-        self.market_caps = data["market_caps"]
+        self.sequences = data["sequences"]      # [N,252]
+        self.dates = data["start_dates"]         # [N,3]
+        self.market_caps = data["market_caps"]   # [N,1]
         
     def __len__(self):
         return len(self.sequences)
@@ -161,7 +171,7 @@ def train():
     
     # 初始化组件
     diffusion = DiffusionProcess(num_timesteps=1000, device=device)
-    model = ConditionalUNet(channels=[32, 64, 128]).to(device)  # 简化模型结构
+    model = ConditionalUNet(channels=[32, 64, 128]).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=2e-4)
     
     # 数据加载
@@ -169,17 +179,19 @@ def train():
         dataset = FinancialDataset("financial_data/sequences/sequences_252.pt")
         dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
         print(f"Loaded dataset with {len(dataset)} samples")
-        print(f"Sample shape: {dataset[0]['sequence'].shape}")
+        print(f"Sample shapes - sequence: {dataset[0]['sequence'].shape}, "
+              f"date: {dataset[0]['date'].shape}, "
+              f"market_cap: {dataset[0]['market_cap'].shape}")
     except Exception as e:
         print(f"Error loading dataset: {e}")
         return
     
     # 训练循环
-    for epoch in range(1, 101):  # 减少epoch数量便于测试
+    for epoch in range(1, 101):
         for batch in dataloader:
-            x = batch["sequence"].to(device)
-            date = batch["date"].to(device)
-            market_cap = batch["market_cap"].to(device)
+            x = batch["sequence"].to(device)          # [32,252]
+            date = batch["date"].to(device)           # [32,3]
+            market_cap = batch["market_cap"].to(device) # [32,1]
             
             # 扩散过程
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
