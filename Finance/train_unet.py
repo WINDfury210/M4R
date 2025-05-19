@@ -192,7 +192,6 @@ class ConditionalUNet1D(nn.Module):
         # 解码器
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+2)]  # 倒数第 i+2 层：i=0 -> skips[-2], i=1 -> skips[-3], i=2 -> skips[-4]
-            print(f"Decoder layer {i+1}: skip.shape = {skip.shape}, x.shape = {x.shape}")
             # 插值 x 以匹配 skip 的序列长度
             if x.shape[-1] != skip.shape[-1]:
                 x = F.interpolate(x, size=skip.shape[-1], mode='linear', align_corners=False)
