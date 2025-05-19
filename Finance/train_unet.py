@@ -106,8 +106,9 @@ class ConditionalUNet1D(nn.Module):
         
         # 时间/条件嵌入
         self.time_embed = TimeEmbedding(cond_dim, embedding_type="sinusoidal")
+        # 日期周期性编码 (6维: 年、月、日的sin和cos) + 市值 (1维)
         self.cond_proj = nn.Sequential(
-            nn.Linear(4, cond_dim),
+            nn.Linear(6 + 1, cond_dim),
             nn.SiLU(),
             nn.Linear(cond_dim, cond_dim)
         )
@@ -158,9 +159,19 @@ class ConditionalUNet1D(nn.Module):
         self.fc_cond = nn.Linear(cond_dim, channels[-1])
 
     def forward(self, x, t, date, market_cap):
+        # 日期周期性编码
+        year, month, day = date[:, 0], date[:, 1], date[:, 2]
+        year_sin = torch.sin(2 * math.pi * year)
+        year_cos = torch.cos(2 * math.pi * year)
+        month_sin = torch.sin(2 * math.pi * month)
+        month_cos = torch.cos(2 * math.pi * month)
+        day_sin = torch.sin(2 * math.pi * day)
+        day_cos = torch.cos(2 * math.pi * day)
+        date_emb = torch.stack([year_sin, year_cos, month_sin, month_cos, day_sin, day_cos], dim=-1)
+        
         # 条件嵌入
         time_emb = self.time_embed(t)
-        cond = torch.cat([date, market_cap], dim=-1)
+        cond = torch.cat([date_emb, market_cap], dim=-1)
         cond_emb = self.cond_proj(cond)
         combined_cond = time_emb + cond_emb
         
@@ -188,11 +199,10 @@ class ConditionalUNet1D(nn.Module):
             x = F.relu(conv(x))
             x = res(x)
         
-        # 最终输出
-        x = torch.cat([x, skips[0]], dim=1)
+        # 最终输出（移除额外拼接）
         x = self.final_upsample(x)
         if x.shape[-1] != self.seq_len:
-            x = F.interpolate(x, size=self.seq_len, mode='linear')
+            x = F.interpolate(x, size=self.seq_len, mode='linear', align_corners=False)
         return self.final_conv(x).squeeze(1)
 
 # ===================== 4. 数据管道 =====================
@@ -273,12 +283,28 @@ def train_model(config):
     
     torch.save(model.state_dict(), os.path.join(config["save_dir"], "final_model.pth"))
 
-# ===================== 6. 主程序 =====================
+# ===================== 6. 采样函数（模板） =====================
+def sample_model(model, diffusion, num_samples, seq_len, date, market_cap, device):
+    model.eval()
+    x = torch.randn(num_samples, seq_len, device=device)
+    with torch.no_grad():
+        for t in reversed(range(diffusion.num_timesteps)):
+            t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
+            noise_pred = model(x, t_tensor, date, market_cap)
+            # 简化DDPM采样，实际需实现完整的逆扩散过程
+            alpha = diffusion.alphas[t]
+            alpha_bar = diffusion.alpha_bars[t]
+            x = (x - (1 - alpha) / torch.sqrt(1 - alpha_bar) * noise_pred) / torch.sqrt(alpha)
+            if t > 0:
+                x += torch.sqrt(diffusion.betas[t]) * torch.randn_like(x)
+    return x
+
+# ===================== 7. 主程序 =====================
 if __name__ == "__main__":
     # 配置
     config = {
         "num_epochs": 1000,
-        "num_timesteps": 2000,
+        "num_timesteps": 1000,  # 减少时间步以加速训练
         "batch_size": 64,
         "seq_len": 252,
         "channels": [32, 64, 128, 256],
@@ -291,11 +317,12 @@ if __name__ == "__main__":
     
     # 验证模型
     print("验证模型结构...")
-    test_model = ConditionalUNet1D(seq_len=252, channels=[32, 64, 128, 256])
-    test_input = torch.randn(2, 252)
-    test_t = torch.randint(0, 1000, (2,))
-    test_date = torch.randn(2, 3)
-    test_mcap = torch.randn(2, 1)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    test_model = ConditionalUNet1D(seq_len=252, channels=[32, 64, 128, 256]).to(device)
+    test_input = torch.randn(2, 252).to(device)
+    test_t = torch.randint(0, 1000, (2,), device=device)
+    test_date = torch.randn(2, 3).to(device)  # 模拟归一化日期
+    test_mcap = torch.randn(2, 1).to(device)
     output = test_model(test_input, test_t, test_date, test_mcap)
     print(f"测试通过！输入: {test_input.shape} -> 输出: {output.shape}")
     assert output.shape == (2, 252)
