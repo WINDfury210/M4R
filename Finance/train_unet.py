@@ -194,8 +194,11 @@ class ConditionalUNet1D(nn.Module):
         
         # 解码器
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
-            skip = skips[-(i+1)]
+            skip = skips[-(i+2)]  # 倒数第 i+2 层：i=0 -> skips[-2], i=1 -> skips[-3], i=2 -> skips[-4]
             print(f"Decoder layer {i+1}: skip.shape = {skip.shape}, x.shape = {x.shape}")
+            # 插值 x 以匹配 skip 的序列长度
+            if x.shape[-1] != skip.shape[-1]:
+                x = F.interpolate(x, size=skip.shape[-1], mode='linear', align_corners=False)
             x = torch.cat([x, skip], dim=1)
             print(f"After concat: x.shape = {x.shape}")
             x = F.relu(conv(x))
@@ -213,7 +216,6 @@ class FinancialDataset(Dataset):
         data = torch.load(data_path)
         self.sequences = data["sequences"]
         self.dates = data["start_dates"]
-        # 忽略 market_caps
         
     def __len__(self):
         return len(self.sequences)
