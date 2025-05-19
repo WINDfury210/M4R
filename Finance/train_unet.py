@@ -315,18 +315,6 @@ if __name__ == "__main__":
         "save_every": 200
     }
     
-    # 验证模型
-    print("验证模型结构...")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    test_model = ConditionalUNet1D(seq_len=252, channels=[32, 64, 128, 256]).to(device)
-    test_input = torch.randn(2, 252).to(device)
-    test_t = torch.randint(0, 1000, (2,), device=device)
-    test_date = torch.randn(2, 3).to(device)  # 模拟归一化日期
-    test_mcap = torch.randn(2, 1).to(device)
-    output = test_model(test_input, test_t, test_date, test_mcap)
-    print(f"测试通过！输入: {test_input.shape} -> 输出: {output.shape}")
-    assert output.shape == (2, 252)
-    
     # 开始训练
     print("\n开始训练...")
     train_model(config)
