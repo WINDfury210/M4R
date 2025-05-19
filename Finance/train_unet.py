@@ -103,14 +103,15 @@ class ConditionalUNet1D(nn.Module):
         self.channels = channels
         self.num_levels = len(channels)
         
-        # 时间嵌入（输出 channels[-1] = 256）
+        # 时间嵌入
         self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
         
-        # 日期嵌入（6维周期性编码 -> channels[-1] = 256）
+        # 日期嵌入（添加 LayerNorm 提高稳定性）
         self.date_embed = nn.Sequential(
             nn.Linear(6, 512),
             nn.ReLU(),
-            nn.Linear(512, channels[-1])
+            nn.Linear(512, channels[-1]),
+            nn.LayerNorm(channels[-1])
         )
         
         # 输入层
@@ -136,7 +137,7 @@ class ConditionalUNet1D(nn.Module):
         self.decoder_convs = nn.ModuleList()
         self.decoder_res = nn.ModuleList()
         for i in range(len(channels)-1):
-            in_channels = channels[-1-i] + channels[-2-i]  # 256+128, 128+64, 64+32
+            in_channels = channels[-1-i] + channels[-2-i]
             out_channels = channels[-2-i]
             self.decoder_convs.append(nn.ConvTranspose1d(
                 in_channels, out_channels,
@@ -167,9 +168,9 @@ class ConditionalUNet1D(nn.Module):
         date_emb = torch.stack([year_sin, year_cos, month_sin, month_cos, day_sin, day_cos], dim=-1)
         
         # 条件嵌入
-        time_emb = self.time_embed(t)  # [batch_size, 256]
-        date_emb = self.date_embed(date_emb)  # [batch_size, 256]
-        combined_cond = time_emb + date_emb  # [batch_size, 256]
+        time_emb = self.time_embed(t)
+        date_emb = self.date_embed(date_emb)
+        combined_cond = time_emb + date_emb
         
         # 输入处理
         x = x.unsqueeze(1)
@@ -191,8 +192,7 @@ class ConditionalUNet1D(nn.Module):
         
         # 解码器
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
-            skip = skips[-(i+2)]  # 倒数第 i+2 层：i=0 -> skips[-2], i=1 -> skips[-3], i=2 -> skips[-4]
-            # 插值 x 以匹配 skip 的序列长度
+            skip = skips[-(i+1)]
             if x.shape[-1] != skip.shape[-1]:
                 x = F.interpolate(x, size=skip.shape[-1], mode='linear', align_corners=False)
             x = torch.cat([x, skip], dim=1)
@@ -271,7 +271,13 @@ def train_model(config):
                 'loss': epoch_loss/len(dataloader)
             }, os.path.join(config["save_dir"], f"model_epoch_{epoch}.pth"))
     
-    torch.save(model.state_dict(), os.path.join(config["save_dir"], "final_model.pth"))
+    # 保存最终模型，统一格式
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'epoch': config["num_epochs"],
+        'loss': epoch_loss/len(dataloader)
+    }, os.path.join(config["save_dir"], "final_model.pth"))
 
 # ===================== 6. 采样函数（模板） =====================
 def sample_model(model, diffusion, num_samples, seq_len, date, device):
