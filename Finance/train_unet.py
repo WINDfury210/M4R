@@ -3,8 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import numpy as np
-from tqdm import tqdm
 import os
 import math
 
@@ -106,7 +104,7 @@ class ConditionalUNet1D(nn.Module):
         # 时间嵌入
         self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
         
-        # 日期嵌入（添加 LayerNorm 提高稳定性）
+        # 日期嵌入（添加 LayerNorm）
         self.date_embed = nn.Sequential(
             nn.Linear(6, 512),
             nn.ReLU(),
@@ -137,7 +135,7 @@ class ConditionalUNet1D(nn.Module):
         self.decoder_convs = nn.ModuleList()
         self.decoder_res = nn.ModuleList()
         for i in range(len(channels)-1):
-            in_channels = channels[-1-i] + channels[-2-i]
+            in_channels = channels[-1-i] + channels[-1-i]  # 256+256, 128+128, 64+64
             out_channels = channels[-2-i]
             self.decoder_convs.append(nn.ConvTranspose1d(
                 in_channels, out_channels,
@@ -183,19 +181,24 @@ class ConditionalUNet1D(nn.Module):
             x = res(x)
             x = attn(x)
             skips.append(x)
+            print(f"Encoder layer {i+1}: x.shape = {x.shape}")
         
         # 中间层+条件注入
         x = self.mid_conv1(x)
+        print(f"Middle layer before cond: x.shape = {x.shape}")
         cond = combined_cond.unsqueeze(-1)
         x = x + cond
         x = self.mid_conv2(x)
+        print(f"Middle layer after cond: x.shape = {x.shape}")
         
         # 解码器
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
+            print(f"Decoder layer {i+1}: skip.shape = {skip.shape}, x.shape = {x.shape}")
             if x.shape[-1] != skip.shape[-1]:
                 x = F.interpolate(x, size=skip.shape[-1], mode='linear', align_corners=False)
             x = torch.cat([x, skip], dim=1)
+            print(f"After concat: x.shape = {x.shape}")
             x = F.relu(conv(x))
             x = res(x)
         
@@ -242,7 +245,7 @@ def train_model(config):
         model.train()
         epoch_loss = 0.0
         
-        for batch in tqdm(dataloader, desc=f"Epoch {epoch}/{config['num_epochs']}"):
+        for batch in dataloader:
             x = batch["sequence"].to(device)
             date = batch["date"].to(device)
             
@@ -271,7 +274,7 @@ def train_model(config):
                 'loss': epoch_loss/len(dataloader)
             }, os.path.join(config["save_dir"], f"model_epoch_{epoch}.pth"))
     
-    # 保存最终模型，统一格式
+    # 保存最终模型
     torch.save({
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
@@ -285,8 +288,8 @@ def sample_model(model, diffusion, num_samples, seq_len, date, device):
     x = torch.randn(num_samples, seq_len, device=device)
     with torch.no_grad():
         for t in reversed(range(diffusion.num_timesteps)):
-            t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
-            noise_pred = model(x, t_tensor, date)
+
+            noise_pred = model(x, t, date)
             alpha = diffusion.alphas[t]
             alpha_bar = diffusion.alpha_bars[t]
             x = (x - (1 - alpha) / torch.sqrt(1 - alpha_bar) * noise_pred) / torch.sqrt(alpha)
