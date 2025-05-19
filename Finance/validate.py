@@ -1,6 +1,6 @@
 """
-Corrected Diffusion Model Validation Script
-Adapted for ConditionalUNet1D with seq_len=256 and new condition embedding
+Diffusion Model Validation Script
+Generate 10 sequences per year (2017-2024) and compute metrics
 """
 
 import json
@@ -93,14 +93,8 @@ class ConditionalUNet1D(nn.Module):
         self.date_embed = nn.Sequential(
             nn.Linear(6, 512),
             nn.ReLU(),
-            nn.Linear(512, channels[-1])
-        )
-        
-        # Market cap embedding (1D -> channels[-1] = 256)
-        self.mcap_embed = nn.Sequential(
-            nn.Linear(1, 512),
-            nn.ReLU(),
-            nn.Linear(512, channels[-1])
+            nn.Linear(512, channels[-1]),
+            nn.LayerNorm(channels[-1])
         )
         
         # Input layer
@@ -145,7 +139,7 @@ class ConditionalUNet1D(nn.Module):
         )
         self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
 
-    def forward(self, x, t, date, market_cap):
+    def forward(self, x, t, date):
         # Date periodic encoding
         year, month, day = date[:, 0], date[:, 1], date[:, 2]
         year_sin = torch.sin(2 * math.pi * year)
@@ -157,10 +151,9 @@ class ConditionalUNet1D(nn.Module):
         date_emb = torch.stack([year_sin, year_cos, month_sin, month_cos, day_sin, day_cos], dim=-1)
         
         # Condition embeddings
-        time_emb = self.time_embed(t)  # [batch_size, 256]
-        date_emb = self.date_embed(date_emb)  # [batch_size, 256]
-        mcap_emb = self.mcap_embed(market_cap)  # [batch_size, 256]
-        combined_cond = time_emb + date_emb + mcap_emb  # [batch_size, 256]
+        time_emb = self.time_embed(t)
+        date_emb = self.date_embed(date_emb)
+        combined_cond = time_emb + date_emb
         
         # Input processing
         x = x.unsqueeze(1)
@@ -200,7 +193,6 @@ class DiffusionProcess:
         self.num_timesteps = num_timesteps
         self.device = device
         
-        # Cosine beta schedule
         self.betas = self._cosine_beta_schedule().to(device)
         self.alphas = 1. - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
@@ -225,7 +217,6 @@ class FinancialDataset(Dataset):
         data = torch.load(data_path)
         self.sequences = data["sequences"]
         self.dates = data["start_dates"]
-        self.market_caps = data["market_caps"]
         
     def __len__(self):
         return len(self.sequences)
@@ -233,51 +224,53 @@ class FinancialDataset(Dataset):
     def __getitem__(self, idx):
         return {
             "sequence": self.sequences[idx],
-            "date": self.dates[idx],
-            "market_cap": self.market_caps[idx]
+            "date": self.dates[idx]
         }
+    
+    def get_annual_start_dates(self, years):
+        """Generate normalized start dates for given years (Jan 1)"""
+        min_year, max_year = 2017, 2024
+        start_dates = []
+        for year in years:
+            # Normalize year to [0, 1] based on 2017-2024
+            norm_year = (year - min_year) / (max_year - min_year)
+            start_date = torch.tensor([norm_year, 0.0, 0.0], dtype=torch.float32)
+            start_dates.append(start_date)
+        return torch.stack(start_dates)  # [num_years, 3]
+    
+    def get_real_sequences_for_year(self, annual_date, num_samples=10):
+        """Find num_samples real sequences closest to annual_date"""
+        date_diffs = torch.norm(self.dates - annual_date, dim=1)
+        closest_indices = torch.argsort(date_diffs)[:num_samples]
+        return self.sequences[closest_indices], closest_indices
 
 # 4. Validation Core ---------------------------------------------------------
 
-def generate_samples(model, diffusion, conditions, num_samples=100, steps=200, device="cuda"):
-    """Improved sample generation function"""
+def generate_samples(model, diffusion, conditions, num_samples=1, steps=50, device="cuda"):
+    """Generate samples with DDIM sampling"""
     with torch.no_grad():
-        # Prepare condition data
         dates = conditions["date"].repeat(num_samples, 1).to(device)
-        market_caps = conditions["market_cap"].repeat(num_samples, 1).to(device)
-        
-        # Initialize noise (reduced scale)
-        samples = torch.randn(num_samples, 256, device=device) * 0.1
-        
-        # Improved generation process
-        for t in tqdm(reversed(range(0, diffusion.num_timesteps, diffusion.num_timesteps // steps)),
+        samples = torch.randn(num_samples, 256, device=device) * 0.05
+        skip = diffusion.num_timesteps // steps
+        for t in tqdm(reversed(range(0, diffusion.num_timesteps, skip)),
                      desc="Generating samples"):
             times = torch.full((num_samples,), t, device=device, dtype=torch.long)
-            pred_noise = model(samples, times, dates, market_caps)
-            
-            # Noise scaling
+            pred_noise = model(samples, times, dates)
             alpha_bar = diffusion.alpha_bars[t]
-            alpha_bar_prev = diffusion.alpha_bars[t-1] if t > 0 else torch.tensor(1.0)
-            
-            # Stable update rule
+            alpha_bar_prev = diffusion.alpha_bars[max(t-skip, 0)]
             x0_pred = (samples - (1 - alpha_bar).sqrt() * pred_noise) / alpha_bar.sqrt()
-            eps_coef = (1 - alpha_bar_prev) / (1 - alpha_bar)
-            eps_coef = torch.clamp(eps_coef, max=2.0)
-            
-            samples = x0_pred * alpha_bar_prev.sqrt() + \
-                     eps_coef.sqrt() * pred_noise * (1 - alpha_bar_prev).sqrt()
-        
-        # Post-processing: clip outliers
+            samples = alpha_bar_prev.sqrt() * x0_pred + (1 - alpha_bar_prev).sqrt() * pred_noise
         samples = torch.clamp(samples, min=-3, max=3)
         return samples.cpu()
 
-def print_enhanced_report(metrics_dict, num_conditions):
-    """Enhanced statistical report"""
+def print_enhanced_report(metrics_dict, years):
+    """Enhanced report with per-year average metrics"""
     print("\n=== Enhanced Validation Report ===")
+    
+    # Global Statistics
     print("\n[Global Statistics]")
     print(f"{'Metric':<15} | {'Real':>12} | {'Generated':>12} | {'Difference':>12} | {'Z-score':>10}")
     print("-" * 70)
-    
     global_stats = metrics_dict['global']
     z_score_mean = (global_stats['gen_mean'] - global_stats['real_mean']) / global_stats['real_std']
     z_score_std = (global_stats['gen_std'] - global_stats['real_std']) / global_stats['real_std']
@@ -288,30 +281,47 @@ def print_enhanced_report(metrics_dict, num_conditions):
           f"{abs(global_stats['gen_std']-global_stats['real_std']):>12.6f} | {z_score_std:>10.2f}")
     print(f"{'Correlation':<15} | {global_stats['real_corr']:>12.6f} | {global_stats['gen_corr']:>12.6f} | "
           f"{abs(global_stats['gen_corr']-global_stats['real_corr']):>12.6f} | {'-':>10}")
+    print(f"{'Autocorr':<15} | {global_stats['real_acf']:>12.6f} | {global_stats['gen_acf']:>12.6f} | "
+          f"{abs(global_stats['gen_acf']-global_stats['real_acf']):>12.6f} | {'-':>10}")
     
-    print("\n[Condition Statistics (First 3)]")
-    for i in range(min(3, num_conditions)):
-        cond_stats = metrics_dict[f'condition_{i}']
-        z_mean = (cond_stats['gen_mean'] - cond_stats['real_mean']) / cond_stats['real_std']
-        z_std = (cond_stats['gen_std'] - cond_stats['real_std']) / cond_stats['real_std']
+    # Per-Year Statistics (average of 10 groups)
+    print("\n[Per-Year Statistics (Average of 10 Groups)]")
+    for year in years:
+        year_metrics = metrics_dict[f'year_{year}']
+        z_mean = (year_metrics['gen_mean'] - year_metrics['real_mean']) / year_metrics['real_std']
+        z_std = (year_metrics['gen_std'] - year_metrics['real_std']) / year_metrics['real_std']
         
-        print(f"\nCondition {i+1}:")
-        print(f"{'Mean':<15} | {cond_stats['real_mean']:>12.6f} | {cond_stats['gen_mean']:>12.6f} | "
-              f"{abs(cond_stats['gen_mean']-cond_stats['real_mean'])/cond_stats['real_mean']*100:>11.2f}% | {z_mean:>10.2f}")
-        print(f"{'Std Dev':<15} | {cond_stats['real_std']:>12.6f} | {cond_stats['gen_std']:>12.6f} | "
-              f"{abs(cond_stats['gen_std']-cond_stats['real_std'])/cond_stats['real_std']*100:>11.2f}% | {z_std:>10.2f}")
+        print(f"\nYear {year}:")
+        print(f"{'Metric':<15} | {'Real':>12} | {'Generated':>12} | {'Diff %':>11} | {'Z-score':>10}")
+        print("-" * 70)
+        print(f"{'Mean':<15} | {year_metrics['real_mean']:>12.6f} | {year_metrics['gen_mean']:>12.6f} | "
+              f"{abs(year_metrics['gen_mean']-year_metrics['real_mean'])/year_metrics['real_mean']*100:>11.2f}% | {z_mean:>10.2f}")
+        print(f"{'Std Dev':<15} | {year_metrics['real_std']:>12.6f} | {year_metrics['gen_std']:>12.6f} | "
+              f"{abs(year_metrics['gen_std']-year_metrics['real_std'])/year_metrics['real_std']*100:>11.2f}% | {z_std:>10.2f}")
+        print(f"{'Correlation':<15} | {year_metrics['real_corr']:>12.6f} | {year_metrics['gen_corr']:>12.6f} | {'-':>11} | {'-':>10}")
+        print(f"{'Autocorr':<15} | {year_metrics['real_acf']:>12.6f} | {year_metrics['gen_acf']:>12.6f} | {'-':>11} | {'-':>10}")
     
+    # Issue Diagnostics
     print("\n[Issue Diagnostics]")
     if global_stats['gen_std'] > global_stats['real_std'] * 1.5:
-        print("⚠️ Excessive generated volatility: Check noise schedule or reduce initial noise scale")
+        print("⚠️ Excessive global volatility: Check noise schedule or reduce initial noise scale")
     if abs(z_score_mean) > 3:
-        print("⚠️ Significant mean shift: Check condition injection or model bias")
+        print("⚠️ Significant global mean shift: Check condition injection or model bias")
     if global_stats['gen_corr'] < global_stats['real_corr'] * 0.5:
-        print("⚠️ Low correlation: Consider increasing model capacity or adjusting training objective")
+        print("⚠️ Low global correlation: Consider increasing model capacity")
+    if abs(global_stats['gen_acf'] - global_stats['real_acf']) > 0.1:
+        print("⚠️ Global autocorrelation mismatch: Check temporal modeling")
 
 def calculate_metrics(real_data, generated_data):
-    """Calculate comparison metrics"""
+    """Calculate metrics for single or multiple sequences"""
+    from statsmodels.tsa.stattools import acf
     metrics = {}
+    
+    # Ensure input shapes: [N, 256] or [1, 256]
+    if real_data.dim() == 1:
+        real_data = real_data.unsqueeze(0)
+    if generated_data.dim() == 1:
+        generated_data = generated_data.unsqueeze(0)
     
     # Basic statistics
     metrics['real_mean'] = real_data.mean().item()
@@ -319,13 +329,23 @@ def calculate_metrics(real_data, generated_data):
     metrics['real_std'] = real_data.std().item()
     metrics['gen_std'] = generated_data.std().item()
     
-    # Correlation
+    # Correlation (handle single sequence)
     real_data_np = real_data.numpy()
     gen_data_np = generated_data.numpy()
-    real_corr = np.corrcoef(real_data_np, rowvar=False)
-    gen_corr = np.corrcoef(gen_data_np, rowvar=False)
-    metrics['real_corr'] = np.abs(real_corr).mean() if real_corr.shape[0] > 1 else 0.0
-    metrics['gen_corr'] = np.abs(gen_corr).mean() if gen_corr.shape[0] > 1 else 0.0
+    if real_data_np.shape[0] > 1:
+        real_corr = np.corrcoef(real_data_np, rowvar=False)
+        gen_corr = np.corrcoef(gen_data_np, rowvar=False)
+        metrics['real_corr'] = np.abs(real_corr).mean()
+        metrics['gen_corr'] = np.abs(gen_corr).mean()
+    else:
+        metrics['real_corr'] = 0.0
+        metrics['gen_corr'] = 0.0
+    
+    # Autocorrelation (lags 1 to 20)
+    real_acf = acf(real_data_np.flatten(), nlags=20, fft=True)[1:].mean()
+    gen_acf = acf(gen_data_np.flatten(), nlags=20, fft=True)[1:].mean()
+    metrics['real_acf'] = real_acf
+    metrics['gen_acf'] = gen_acf
     
     # Distribution similarity
     real_hist = np.histogram(real_data_np.flatten(), bins=50, density=True)[0]
@@ -338,60 +358,32 @@ def calculate_metrics(real_data, generated_data):
     
     return metrics
 
-def print_comparison_report(metrics_dict, num_conditions):
-    """Print detailed comparison report"""
-    print("\n=== Validation Report ===")
-    
-    print("\n[Global Statistics]")
-    print(f"{'Metric':<15} | {'Real':>10} | {'Generated':>10} | {'Difference':>10}")
-    print("-" * 50)
-    for metric in ['mean', 'std', 'corr']:
-        real = metrics_dict['global'][f'real_{metric}']
-        gen = metrics_dict['global'][f'gen_{metric}']
-        diff = abs(real - gen)
-        print(f"{metric:<15} | {real:>10.4f} | {gen:>10.4f} | {diff:>10.4f}")
-    print(f"KL Divergence: {metrics_dict['global']['kl_div']:.4f}")
-    
-    print("\n[Condition-Specific Statistics]")
-    for i in range(num_conditions):
-        cond_metrics = metrics_dict[f'condition_{i}']
-        print(f"\nCondition {i+1}:")
-        print(f"{'Metric':<15} | {'Real':>10} | {'Generated':>10} | {'Diff %':>10}")
-        print("-" * 50)
-        for metric in ['mean', 'std']:
-            real = cond_metrics[f'real_{metric}']
-            gen = cond_metrics[f'gen_{metric}']
-            diff_pct = abs(real - gen) / real * 100 if real != 0 else 0.0
-            print(f"{metric:<15} | {real:>10.4f} | {gen:>10.4f} | {diff_pct:>9.2f}%")
-        print(f"{'correlation':<15} | {cond_metrics['real_corr']:>10.4f} | "
-              f"{cond_metrics['gen_corr']:>10.4f} | {'-':>10}")
-
-def save_visualizations(real_samples, gen_samples, metrics, output_dir):
-    """Save comparison visualizations"""
+def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
+    """Save visualizations and metrics for a specific year"""
     os.makedirs(output_dir, exist_ok=True)
     
     # Save metrics
-    with open(os.path.join(output_dir, 'metrics.json'), 'w') as f:
+    with open(os.path.join(output_dir, f'metrics_{year}.json'), 'w') as f:
         json.dump(metrics, f, indent=2)
     
-    # Sample comparison plot
+    # Sample comparison plot (first 3 groups)
     plt.figure(figsize=(15, 5))
     for i in range(min(3, len(real_samples))):
         plt.subplot(2, 3, i+1)
         plt.plot(real_samples[i].numpy())
-        plt.title(f"Real Sample {i+1}")
+        plt.title(f"Real Sample {i+1} (Year {year})")
         
         plt.subplot(2, 3, i+4)
         plt.plot(gen_samples[i].numpy())
-        plt.title(f"Generated Sample {i+1}")
+        plt.title(f"Generated Sample {i+1} (Year {year})")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'samples_comparison.png'))
+    plt.savefig(os.path.join(output_dir, f'year_{year}_samples.png'))
     plt.close()
 
 # 5. Main Validation Function ------------------------------------------------
 
 def run_validation(model_path, data_path, output_dir="validation_results"):
-    """Run complete validation pipeline"""
+    """Generate 10 sequences per year (2017-2024) and compute metrics"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Initialize components
@@ -406,65 +398,92 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
     dataset = FinancialDataset(data_path)
     dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
     
-    # Prepare test conditions
-    test_data = next(iter(dataloader))
-    num_conditions = 5
-    cond_indices = torch.randperm(len(test_data["date"]))[:num_conditions]
+    # Define years
+    years = list(range(2017, 2025))  # 2017 to 2024
+    num_groups_per_year = 10
+    
+    # Get annual start dates
+    annual_dates = dataset.get_annual_start_dates(years)  # [8, 3]
     
     # Storage for results
     metrics = {}
-    real_samples = []
-    gen_samples = []
+    all_gen_samples = []
+    all_real_samples = []
     
     # Global real data metrics
     real_all = torch.cat([batch["sequence"] for batch in dataloader], dim=0)
-    metrics['global'] = calculate_metrics(real_all, real_all)  # Baseline
     
-    # Validate per condition
-    for i, idx in enumerate(cond_indices):
-        condition = {
-            "date": test_data["date"][idx].unsqueeze(0),
-            "market_cap": test_data["market_cap"][idx].unsqueeze(0)
-        }
+    # Process each year
+    for year_idx, year in enumerate(years):
+        annual_date = annual_dates[year_idx].to(device)
+        condition = {"date": annual_date.unsqueeze(0)}
         
-        # Get real data
-        real_data = test_data["sequence"][idx].unsqueeze(0)
-        
-        # Generate samples
-        gen_data = generate_samples(
-            model, diffusion, condition,
-            num_samples=100,
-            device=device
+        # Get real sequences for this year
+        real_sequences, real_indices = dataset.get_real_sequences_for_year(
+            annual_date.cpu(), num_samples=num_groups_per_year
         )
         
-        # Calculate and store metrics
-        metrics[f'condition_{i}'] = calculate_metrics(real_data, gen_data)
+        # Generate 10 groups and compute metrics
+        year_metrics_list = []
+        year_gen_samples = []
+        year_real_samples = []
         
-        # Store samples for visualization
-        if i < 3:
-            real_samples.append(real_data.squeeze())
-            gen_samples.append(gen_data[0])
+        for group_idx in range(num_groups_per_year):
+            # Generate one sequence
+            gen_data = generate_samples(
+                model, diffusion, condition,
+                num_samples=1,
+                device=device
+            )
+            
+            # Get corresponding real data
+            real_data = real_sequences[group_idx].unsqueeze(0)
+            
+            # Compute metrics for this group
+            group_metrics = calculate_metrics(real_data, gen_data)
+            year_metrics_list.append(group_metrics)
+            
+            # Store samples for visualization (first 3 groups)
+            if group_idx < 3:
+                year_real_samples.append(real_data.squeeze())
+                year_gen_samples.append(gen_data.squeeze())
+            
+            # Collect for global metrics
+            all_gen_samples.append(gen_data)
+            all_real_samples.append(real_data)
+        
+        # Compute average metrics for the year
+        year_metrics = {
+            'real_mean': np.mean([m['real_mean'] for m in year_metrics_list]),
+            'gen_mean': np.mean([m['gen_mean'] for m in year_metrics_list]),
+            'real_std': np.mean([m['real_std'] for m in year_metrics_list]),
+            'gen_std': np.mean([m['gen_std'] for m in year_metrics_list]),
+            'real_corr': np.mean([m['real_corr'] for m in year_metrics_list]),
+            'gen_corr': np.mean([m['gen_corr'] for m in year_metrics_list]),
+            'real_acf': np.mean([m['real_acf'] for m in year_metrics_list]),
+            'gen_acf': np.mean([m['gen_acf'] for m in year_metrics_list]),
+            'kl_div': np.mean([m['kl_div'] for m in year_metrics_list])
+        }
+        metrics[f'year_{year}'] = year_metrics
+        
+        # Save visualizations and metrics for this year
+        save_visualizations(year_real_samples, year_gen_samples, year_metrics, year, output_dir)
     
-    # Calculate global generated metrics
-    gen_all = torch.cat([
-        generate_samples(
-            model, diffusion,
-            {"date": test_data["date"][i].unsqueeze(0),
-             "market_cap": test_data["market_cap"][i].unsqueeze(0)},
-            num_samples=20,
-            device=device
-        ) for i in cond_indices
-    ])
-    metrics['global'] = calculate_metrics(real_all, gen_all)
+    # Compute global metrics
+    gen_all = torch.cat(all_gen_samples, dim=0)
+    real_all_subset = torch.cat(all_real_samples, dim=0)
+    metrics['global'] = calculate_metrics(real_all_subset, gen_all)
     
-    # Print and save results
-    print_enhanced_report(metrics, num_conditions)
-    print_comparison_report(metrics, num_conditions)
-    save_visualizations(real_samples, gen_samples, metrics, output_dir)
+    # Save global metrics
+    with open(os.path.join(output_dir, 'metrics_global.json'), 'w') as f:
+        json.dump(metrics['global'], f, indent=2)
+    
+    # Print report
+    print_enhanced_report(metrics, years)
     print(f"\nValidation complete! Results saved to {output_dir}")
 
 if __name__ == "__main__":
     run_validation(
         model_path="saved_models/final_model.pth",
-        data_path="financial_data/sequences/sequences_256.pt"
+        data_path="financial_data/sequences_256.pt"
     )
