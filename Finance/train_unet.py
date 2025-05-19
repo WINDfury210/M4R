@@ -32,48 +32,80 @@ class DiffusionProcess:
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
-# ===================== 2. 严格对称的UNet =====================
+# ===================== 2. 网络组件 =====================
 class TimeEmbedding(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, embedding_type="sinusoidal", hidden_dim=1024):
         super().__init__()
-        half_dim = dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim) * -emb)
-        self.register_buffer('emb', emb)
-        self.proj = nn.Linear(dim, dim)
+        self.dim = dim
+        self.embedding_type = embedding_type
+        if embedding_type == "sinusoidal":
+            half_dim = dim // 2
+            emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
+            emb = torch.exp(torch.arange(half_dim, dtype=torch.float) * -emb)
+            self.register_buffer("emb", emb)
+        elif embedding_type == "linear":
+            self.mlp = nn.Sequential(
+                nn.Linear(1, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, dim)
+            )
 
     def forward(self, time):
-        emb = time.float()[:, None] * self.emb[None, :]
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
-        return self.proj(emb)
+        if self.embedding_type == "sinusoidal":
+            emb = time[:, None] * self.emb[None, :]
+            emb = torch.cat((torch.sin(emb), torch.cos(emb)), dim=-1)
+            if self.dim % 2 == 1:
+                emb = F.pad(emb, (0, 1, 0, 0))
+            return emb
+        elif self.embedding_type == "linear":
+            time = time.unsqueeze(-1).float()
+            return self.mlp(time)
 
-class CondBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, cond_dim=None, downsample=False):
+class SelfAttention1D(nn.Module):
+    def __init__(self, channels):
         super().__init__()
-        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=3,
-                             stride=2 if downsample else 1,
-                             padding=1)
-        self.norm = nn.GroupNorm(8, out_ch)
-        self.act = nn.SiLU()
-        self.cond_proj = nn.Linear(cond_dim, out_ch) if cond_dim else None
+        self.query = nn.Conv1d(channels, channels // 8, kernel_size=1)
+        self.key = nn.Conv1d(channels, channels // 8, kernel_size=1)
+        self.value = nn.Conv1d(channels, channels, kernel_size=1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+        self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x, cond=None):
-        x = self.conv(x)
-        x = self.norm(x)
-        if self.cond_proj is not None and cond is not None:
-            x = x + self.cond_proj(cond).unsqueeze(-1)
-        return self.act(x)
+    def forward(self, x):
+        batch, ch, seq_len = x.size()
+        q = self.query(x).view(batch, -1, seq_len).permute(0, 2, 1)
+        k = self.key(x).view(batch, -1, seq_len)
+        v = self.value(x).view(batch, -1, seq_len)
+        attn = self.softmax(torch.bmm(q, k) / (ch // 8) ** 0.5)
+        out = torch.bmm(v, attn.permute(0, 2, 1)).view(batch, ch, seq_len)
+        return x + self.gamma * out
 
-class SymmetricUNet(nn.Module):
+class ResidualBlock1D(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.relu = nn.ReLU()
+        self.shortcut = nn.Conv1d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+
+    def forward(self, x):
+        residual = self.shortcut(x)
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += residual
+        return self.relu(out)
+
+# ===================== 3. 条件UNet =====================
+class ConditionalUNet1D(nn.Module):
     def __init__(self, seq_len=252, channels=[32, 64, 128, 256], cond_dim=128):
         super().__init__()
-        # 修改为支持252长度的4层结构：252 → 126 → 63 → 32 → 16 → 32 → 63 → 126 → 252
         self.seq_len = seq_len
         self.channels = channels
         self.num_levels = len(channels)
         
-        # 条件系统
-        self.time_embed = TimeEmbedding(cond_dim)
+        # 时间/条件嵌入
+        self.time_embed = TimeEmbedding(cond_dim, embedding_type="sinusoidal")
         self.cond_proj = nn.Sequential(
             nn.Linear(4, cond_dim),
             nn.SiLU(),
@@ -83,49 +115,47 @@ class SymmetricUNet(nn.Module):
         # 输入层
         self.input_conv = nn.Conv1d(1, channels[0], kernel_size=3, padding=1)
         
-        # 编码器（全部下采样）
-        self.encoder = nn.ModuleList()
-        for i in range(self.num_levels):
-            in_ch = channels[i-1] if i > 0 else channels[0]
-            self.encoder.append(
-                CondBlock(in_ch, channels[i], 
-                         cond_dim if i==self.num_levels-1 else None,
-                         downsample=True)
-            )
+        # 编码器
+        self.encoder_convs = nn.ModuleList()
+        self.encoder_res = nn.ModuleList()
+        self.attentions = nn.ModuleList()
+        in_channels = channels[0]
+        for i, out_channels in enumerate(channels):
+            self.encoder_convs.append(nn.Conv1d(in_channels, out_channels, kernel_size=3, 
+                                              stride=2 if i>0 else 1, padding=1))
+            self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
+            self.attentions.append(SelfAttention1D(out_channels) if i in [1, 2, 3] else nn.Identity())
+            in_channels = out_channels
         
         # 中间层
-        self.mid_conv1 = CondBlock(channels[-1], channels[-1], None)
-        self.mid_conv2 = CondBlock(channels[-1], channels[-1], None)
+        self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
+        self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
         
-        # 解码器（严格对称上采样）
-        self.decoder = nn.ModuleList()
-        for i in reversed(range(self.num_levels)):
-            # 上采样层
-            self.decoder.append(nn.Sequential(
-                nn.ConvTranspose1d(
-                    channels[i], channels[max(i-1,0)],
-                    kernel_size=3, stride=2,
-                    padding=1, output_padding=1
-                ),
-                nn.GroupNorm(8, channels[max(i-1,0)]),
-                nn.SiLU()
+        # 解码器
+        self.decoder_convs = nn.ModuleList()
+        self.decoder_res = nn.ModuleList()
+        for i in range(len(channels)-1):
+            in_channels = channels[-1-i] + channels[-2-i]
+            out_channels = channels[-2-i]
+            self.decoder_convs.append(nn.ConvTranspose1d(
+                in_channels, out_channels,
+                kernel_size=3, stride=2,
+                padding=1, output_padding=1
             ))
-            # 条件块
-            use_cond = (i == self.num_levels-1)
-            self.decoder.append(
-                CondBlock(channels[max(i-1,0)]*2, channels[max(i-1,0)],
-                         cond_dim if use_cond else None)
-            )
+            self.decoder_res.append(ResidualBlock1D(out_channels, out_channels))
         
-        # 最终补偿层（处理252→126→63→32→16→32→63→126→251的1点差异）
+        # 输出层
         self.final_upsample = nn.Sequential(
-            nn.ConvTranspose1d(channels[0], channels[0], 
-                             kernel_size=3, stride=2,
-                             padding=1, output_padding=0),
-            nn.GroupNorm(8, channels[0]),
-            nn.SiLU()
+            nn.ConvTranspose1d(channels[0], channels[0],
+                              kernel_size=3, stride=2,
+                              padding=1, output_padding=0),
+            nn.BatchNorm1d(channels[0]),
+            nn.ReLU()
         )
         self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
+        
+        # 条件投影
+        self.fc_cond = nn.Linear(cond_dim, channels[-1])
 
     def forward(self, x, t, date, market_cap):
         # 条件嵌入
@@ -140,37 +170,38 @@ class SymmetricUNet(nn.Module):
         skips = [x]
         
         # 编码器
-        for i, block in enumerate(self.encoder):
-            x = block(x, combined_cond if i==self.num_levels-1 else None)
+        for conv, res, attn in zip(self.encoder_convs, self.encoder_res, self.attentions):
+            x = F.relu(conv(x))
+            x = res(x)
+            x = attn(x)
             skips.append(x)
         
-        # 中间层
-        x = self.mid_conv1(x, None)
-        x = self.mid_conv2(x, None)
+        # 中间层+条件注入
+        x = self.mid_conv1(x)
+        x = x + self.fc_cond(combined_cond).unsqueeze(-1)
+        x = self.mid_conv2(x)
         
         # 解码器
-        for i in range(0, len(self.decoder), 2):
-            x = self.decoder[i](x)
+        for conv, res in zip(self.decoder_convs, self.decoder_res):
             skip = skips.pop()
-            if x.shape[-1] != skip.shape[-1]:
-                x = F.pad(x, (0, skip.shape[-1]-x.shape[-1]))
             x = torch.cat([x, skip], dim=1)
-            use_cond = (i == len(self.decoder)-2)
-            x = self.decoder[i+1](x, combined_cond if use_cond else None)
+            x = F.relu(conv(x))
+            x = res(x)
         
-        # 最终补偿
+        # 最终输出
+        x = torch.cat([x, skips[0]], dim=1)
         x = self.final_upsample(x)
         if x.shape[-1] != self.seq_len:
             x = F.interpolate(x, size=self.seq_len, mode='linear')
         return self.final_conv(x).squeeze(1)
 
-# ===================== 3. 数据管道 =====================
+# ===================== 4. 数据管道 =====================
 class FinancialDataset(Dataset):
     def __init__(self, data_path):
         data = torch.load(data_path)
-        self.sequences = data["sequences"]  # [N, 252]
-        self.dates = data["start_dates"]    # [N, 3]
-        self.market_caps = data["market_caps"] # [N, 1]
+        self.sequences = data["sequences"]
+        self.dates = data["start_dates"]
+        self.market_caps = data["market_caps"]
         
     def __len__(self):
         return len(self.sequences)
@@ -182,14 +213,14 @@ class FinancialDataset(Dataset):
             "market_cap": self.market_caps[idx]
         }
 
-# ===================== 4. 训练系统 =====================
+# ===================== 5. 训练系统 =====================
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(config["save_dir"], exist_ok=True)
     
     # 初始化组件
     diffusion = DiffusionProcess(num_timesteps=config["num_timesteps"], device=device)
-    model = SymmetricUNet(
+    model = ConditionalUNet1D(
         seq_len=config["seq_len"],
         channels=config["channels"],
         cond_dim=config["cond_dim"]
@@ -242,15 +273,15 @@ def train_model(config):
     
     torch.save(model.state_dict(), os.path.join(config["save_dir"], "final_model.pth"))
 
-# ===================== 5. 主程序 =====================
+# ===================== 6. 主程序 =====================
 if __name__ == "__main__":
-    # 配置（严格适配252长度的4层结构）
+    # 配置
     config = {
         "num_epochs": 1000,
         "num_timesteps": 2000,
         "batch_size": 64,
-        "seq_len": 252,  # 严格保持252
-        "channels": [32, 64, 128, 256],  # 4层结构
+        "seq_len": 252,
+        "channels": [32, 64, 128, 256],
         "cond_dim": 128,
         "lr": 2e-4,
         "data_path": "financial_data/sequences_252.pt",
@@ -258,16 +289,16 @@ if __name__ == "__main__":
         "save_every": 200
     }
     
-    # 验证模型结构
+    # 验证模型
     print("验证模型结构...")
-    test_model = SymmetricUNet(seq_len=252, channels=[32, 64, 128, 256])
+    test_model = ConditionalUNet1D(seq_len=252, channels=[32, 64, 128, 256])
     test_input = torch.randn(2, 252)
     test_t = torch.randint(0, 1000, (2,))
     test_date = torch.randn(2, 3)
     test_mcap = torch.randn(2, 1)
     output = test_model(test_input, test_t, test_date, test_mcap)
     print(f"测试通过！输入: {test_input.shape} -> 输出: {output.shape}")
-    assert output.shape == test_input.shape
+    assert output.shape == (2, 252)
     
     # 开始训练
     print("\n开始训练...")
