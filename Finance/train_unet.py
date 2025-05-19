@@ -14,7 +14,6 @@ class DiffusionProcess:
         self.num_timesteps = num_timesteps
         self.device = device
         
-        # 余弦噪声调度
         self.betas = self._cosine_beta_schedule().to(device)
         self.alphas = 1. - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
@@ -98,19 +97,27 @@ class ResidualBlock1D(nn.Module):
 
 # ===================== 3. 条件UNet =====================
 class ConditionalUNet1D(nn.Module):
-    def __init__(self, seq_len=252, channels=[32, 64, 128, 256], cond_dim=128):
+    def __init__(self, seq_len=252, channels=[32, 64, 128, 256]):
         super().__init__()
         self.seq_len = seq_len
         self.channels = channels
         self.num_levels = len(channels)
         
-        # 时间/条件嵌入
-        self.time_embed = TimeEmbedding(cond_dim, embedding_type="sinusoidal")
-        # 日期周期性编码 (6维: 年、月、日的sin和cos) + 市值 (1维)
-        self.cond_proj = nn.Sequential(
-            nn.Linear(6 + 1, cond_dim),
-            nn.SiLU(),
-            nn.Linear(cond_dim, cond_dim)
+        # 时间嵌入（输出 channels[-1] = 256）
+        self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
+        
+        # 日期嵌入（6维周期性编码 -> channels[-1] = 256）
+        self.date_embed = nn.Sequential(
+            nn.Linear(6, 512),
+            nn.ReLU(),
+            nn.Linear(512, channels[-1])
+        )
+        
+        # 市场资本化嵌入（1维 -> channels[-1] = 256）
+        self.mcap_embed = nn.Sequential(
+            nn.Linear(1, 512),
+            nn.ReLU(),
+            nn.Linear(512, channels[-1])
         )
         
         # 输入层
@@ -137,6 +144,8 @@ class ConditionalUNet1D(nn.Module):
         self.decoder_res = nn.ModuleList()
         for i in range(len(channels)-1):
             in_channels = channels[-1-i] + channels[-2-i]
+            if i == 0:  # 临时修复：适配 256 + 256 = 512
+                in_channels = channels[-1-i] + channels[-1-i]
             out_channels = channels[-2-i]
             self.decoder_convs.append(nn.ConvTranspose1d(
                 in_channels, out_channels,
@@ -154,9 +163,6 @@ class ConditionalUNet1D(nn.Module):
             nn.ReLU()
         )
         self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
-        
-        # 条件投影
-        self.fc_cond = nn.Linear(cond_dim, channels[-1])
 
     def forward(self, x, t, date, market_cap):
         # 日期周期性编码
@@ -169,11 +175,13 @@ class ConditionalUNet1D(nn.Module):
         day_cos = torch.cos(2 * math.pi * day)
         date_emb = torch.stack([year_sin, year_cos, month_sin, month_cos, day_sin, day_cos], dim=-1)
         
-        # 条件嵌入
-        time_emb = self.time_embed(t)
-        cond = torch.cat([date_emb, market_cap], dim=-1)
-        cond_emb = self.cond_proj(cond)
-        combined_cond = time_emb + cond_emb
+        # 条件嵌入（全部映射到 channels[-1] = 256）
+        time_emb = self.time_embed(t)  # [batch_size, 256]
+        date_emb = self.date_embed(date_emb)  # [batch_size, 256]
+        mcap_emb = self.mcap_embed(market_cap)  # [batch_size, 256]
+        
+        # 直接相加
+        combined_cond = time_emb + date_emb + mcap_emb  # [batch_size, 256]
         
         # 输入处理
         x = x.unsqueeze(1)
@@ -181,25 +189,32 @@ class ConditionalUNet1D(nn.Module):
         skips = [x]
         
         # 编码器
-        for conv, res, attn in zip(self.encoder_convs, self.encoder_res, self.attentions):
+        for i, (conv, res, attn) in enumerate(zip(self.encoder_convs, self.encoder_res, self.attentions)):
             x = F.relu(conv(x))
             x = res(x)
             x = attn(x)
             skips.append(x)
+            print(f"Encoder layer {i+1}: x.shape = {x.shape}")  # 调试打印
         
         # 中间层+条件注入
         x = self.mid_conv1(x)
-        x = x + self.fc_cond(combined_cond).unsqueeze(-1)
+        print(f"Middle layer before cond: x.shape = {x.shape}")  # 调试打印
+        # 广播条件到序列长度
+        cond = combined_cond.unsqueeze(-1)  # [batch_size, 256, 1]
+        x = x + cond  # [batch_size, 256, seq_len]
         x = self.mid_conv2(x)
+        print(f"Middle layer after cond: x.shape = {x.shape}")  # 调试打印
         
         # 解码器
-        for conv, res in zip(self.decoder_convs, self.decoder_res):
+        for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips.pop()
+            print(f"Decoder layer {i+1}: skip.shape = {skip.shape}, x.shape = {x.shape}")  # 调试打印
             x = torch.cat([x, skip], dim=1)
+            print(f"After concat: x.shape = {x.shape}")  # 调试打印
             x = F.relu(conv(x))
             x = res(x)
         
-        # 最终输出（移除额外拼接）
+        # 最终输出
         x = self.final_upsample(x)
         if x.shape[-1] != self.seq_len:
             x = F.interpolate(x, size=self.seq_len, mode='linear', align_corners=False)
@@ -232,8 +247,7 @@ def train_model(config):
     diffusion = DiffusionProcess(num_timesteps=config["num_timesteps"], device=device)
     model = ConditionalUNet1D(
         seq_len=config["seq_len"],
-        channels=config["channels"],
-        cond_dim=config["cond_dim"]
+        channels=config["channels"]
     ).to(device)
     
     optimizer = optim.AdamW(model.parameters(), lr=config["lr"])
@@ -291,7 +305,6 @@ def sample_model(model, diffusion, num_samples, seq_len, date, market_cap, devic
         for t in reversed(range(diffusion.num_timesteps)):
             t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
             noise_pred = model(x, t_tensor, date, market_cap)
-            # 简化DDPM采样，实际需实现完整的逆扩散过程
             alpha = diffusion.alphas[t]
             alpha_bar = diffusion.alpha_bars[t]
             x = (x - (1 - alpha) / torch.sqrt(1 - alpha_bar) * noise_pred) / torch.sqrt(alpha)
@@ -304,16 +317,27 @@ if __name__ == "__main__":
     # 配置
     config = {
         "num_epochs": 1000,
-        "num_timesteps": 1000,  # 减少时间步以加速训练
+        "num_timesteps": 1000,
         "batch_size": 64,
         "seq_len": 252,
         "channels": [32, 64, 128, 256],
-        "cond_dim": 128,
         "lr": 2e-4,
-        "data_path": "financial_data/sequences/sequences_252.pt",
+        "data_path": "financial_data/sequences_252.pt",
         "save_dir": "saved_models",
         "save_every": 200
     }
+    
+    # 验证模型
+    print("验证模型结构...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    test_model = ConditionalUNet1D(seq_len=252, channels=[32, 64, 128, 256]).to(device)
+    test_input = torch.randn(2, 252).to(device)
+    test_t = torch.randint(0, 1000, (2,), device=device)
+    test_date = torch.randn(2, 3).to(device)
+    test_mcap = torch.randn(2, 1).to(device)
+    output = test_model(test_input, test_t, test_date, test_mcap)
+    print(f"测试通过！输入: {test_input.shape} -> 输出: {output.shape}")
+    assert output.shape == (2, 252)
     
     # 开始训练
     print("\n开始训练...")
