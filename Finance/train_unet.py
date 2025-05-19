@@ -300,7 +300,7 @@ if __name__ == "__main__":
         "seq_len": 256,
         "channels": [32, 64, 128, 256],
         "lr": 2e-4,
-        "data_path": "financial_data/sequences/sequences_256.pt",
+        "data_path": "financial_data/sequences_256.pt",
         "save_dir": "saved_models",
         "save_every": 200
     }
