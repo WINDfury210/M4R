@@ -181,24 +181,19 @@ class ConditionalUNet1D(nn.Module):
             x = res(x)
             x = attn(x)
             skips.append(x)
-            print(f"Encoder layer {i+1}: x.shape = {x.shape}")
-        
+            
         # 中间层+条件注入
         x = self.mid_conv1(x)
-        print(f"Middle layer before cond: x.shape = {x.shape}")
         cond = combined_cond.unsqueeze(-1)
         x = x + cond
         x = self.mid_conv2(x)
-        print(f"Middle layer after cond: x.shape = {x.shape}")
         
         # 解码器
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
-            print(f"Decoder layer {i+1}: skip.shape = {skip.shape}, x.shape = {x.shape}")
             if x.shape[-1] != skip.shape[-1]:
                 x = F.interpolate(x, size=skip.shape[-1], mode='linear', align_corners=False)
             x = torch.cat([x, skip], dim=1)
-            print(f"After concat: x.shape = {x.shape}")
             x = F.relu(conv(x))
             x = res(x)
         
