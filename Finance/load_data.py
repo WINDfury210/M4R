@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # 配置
-sequence_length = 252
+sequence_length = 256
 start_date = "2017-01-01"
 end_date = "2024-12-31"
 output_dir = "financial_data/sequences"
@@ -20,7 +20,7 @@ cache_dir = "financial_data/cache"
 cache_file = os.path.join(cache_dir, "sp500_data.parquet")
 os.makedirs(output_dir, exist_ok=True)
 os.makedirs(cache_dir, exist_ok=True)
-output_file = os.path.join(output_dir, "sequences_252.pt")
+output_file = os.path.join(output_dir, "sequences_256.pt")
 standardize = False
 target_std = 0.015
 
