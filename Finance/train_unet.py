@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+import numpy as np
 import os
 import math
 
@@ -226,14 +227,26 @@ class FinancialDataset(Dataset):
 
 from statsmodels.tsa.stattools import acf
 def acf_loss(pred, target):
-    pred_acf = acf(pred.cpu().numpy().flatten(), nlags=20, fft=True)[1:]
-    target_acf = acf(target.cpu().numpy().flatten(), nlags=20, fft=True)[1:]
-    return F.mse_loss(torch.tensor(pred_acf, device=pred.device), torch.tensor(target_acf, device=pred.device))
+    """Compute MSE loss between ACF of predictions and target."""
+    # 确保批量处理，pred/target: [batch_size, seq_len]
+    pred_np = pred.detach().cpu().numpy()  # [batch_size, seq_len]
+    target_np = target.detach().cpu().numpy()
+    
+    # 计算每批次样本的 ACF
+    pred_acf = np.array([acf(pred_np[i].flatten(), nlags=20, fft=True)[1:] for i in range(pred_np.shape[0])]).mean(axis=0)
+    target_acf = np.array([acf(target_np[i].flatten(), nlags=20, fft=True)[1:] for i in range(target_np.shape[0])]).mean(axis=0)
+    
+    # 转换为张量，保留设备
+    pred_acf = torch.tensor(pred_acf, device=pred.device, dtype=torch.float32)
+    target_acf = torch.tensor(target_acf, device=pred.device, dtype=torch.float32)
+    
+    return F.mse_loss(pred_acf, target_acf)
 
 def std_loss(pred, target):
-    pred_std = pred.std(dim=-1)
-    target_std = target.std(dim=-1)
-    return F.mse_loss(torch.tensor(pred_std, device=pred.device), torch.tensor(target_std, device=pred.device))
+    """Compute MSE loss between standard deviations of predictions and target."""
+    pred_std = pred.std(dim=-1)  # [batch_size]
+    target_std = target.std(dim=-1)  # [batch_size]
+    return F.mse_loss(pred_std, target_std)
 
 # ===================== 5. 训练系统 =====================
 def train_model(config):
