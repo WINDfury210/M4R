@@ -233,7 +233,7 @@ def acf_loss(pred, target):
 def std_loss(pred, target):
     pred_std = pred.std(dim=-1)
     target_std = target.std(dim=-1)
-    return F.mse_loss(pred_std, target_std)
+    return F.mse_loss(torch.tensor(pred_std, device=pred.device), torch.tensor(target_std, device=pred.device))
 
 # ===================== 5. 训练系统 =====================
 def train_model(config):
