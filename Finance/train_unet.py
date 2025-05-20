@@ -1,40 +1,19 @@
+"""
+Diffusion Model Training Script
+Train ConditionalUNet1D with MSE, ACF, Std, and Mean losses
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
-import os
+from statsmodels.tsa.stattools import acf
 import math
+import os
 
-# ===================== 1. 扩散过程 =====================
-class DiffusionProcess:
-    def __init__(self, num_timesteps=1000, device="cpu"):
-        self.num_timesteps = num_timesteps
-        self.device = device
-        
-        # self.betas = self._cosine_beta_schedule().to(device)
-        self.betas = self._linear_beta_schedule().to(device)
-        self.alphas = 1. - self.betas
-        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
-        self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
-        self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
-    
-    def _cosine_beta_schedule(self, s=0.008):
-        steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32)
-        f = torch.cos(((steps / self.num_timesteps + s) / (1 + s)) * math.pi / 2) ** 2
-        return torch.clip(1 - f[1:] / f[:-1], 0, 0.999)
-    
-    def _linear_beta_schedule(self):
-        return torch.linspace(1e-4, 0.02, self.num_timesteps)
-    
-    def add_noise(self, x0, t):
-        noise = torch.randn_like(x0, device=self.device)
-        sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
-        sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
-        return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
+# 1. Model Definitions --------------------------------------------------------
 
-# ===================== 2. 网络组件 =====================
 class TimeEmbedding(nn.Module):
     def __init__(self, dim, embedding_type="sinusoidal", hidden_dim=1024):
         super().__init__()
@@ -98,7 +77,6 @@ class ResidualBlock1D(nn.Module):
         out += residual
         return self.relu(out)
 
-# ===================== 3. 条件UNet =====================
 class ConditionalUNet1D(nn.Module):
     def __init__(self, seq_len=256, channels=[32, 64, 128, 256]):
         super().__init__()
@@ -106,21 +84,14 @@ class ConditionalUNet1D(nn.Module):
         self.channels = channels
         self.num_levels = len(channels)
         
-        # 时间嵌入
         self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
-        
-        # 日期嵌入（添加 LayerNorm）
         self.date_embed = nn.Sequential(
-            nn.Linear(6, 512),
+            nn.Linear(3, 512),  # 输入归一化的年、月、日
             nn.ReLU(),
             nn.Linear(512, channels[-1]),
             nn.LayerNorm(channels[-1])
         )
-        
-        # 输入层
         self.input_conv = nn.Conv1d(1, channels[0], kernel_size=3, padding=1)
-        
-        # 编码器
         self.encoder_convs = nn.ModuleList()
         self.encoder_res = nn.ModuleList()
         self.attentions = nn.ModuleList()
@@ -131,16 +102,12 @@ class ConditionalUNet1D(nn.Module):
             self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
             self.attentions.append(SelfAttention1D(out_channels) if i in [1, 2, 3] else nn.Identity())
             in_channels = out_channels
-        
-        # 中间层
         self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
         self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
-        
-        # 解码器
         self.decoder_convs = nn.ModuleList()
         self.decoder_res = nn.ModuleList()
         for i in range(len(channels)-1):
-            in_channels = channels[-1-i] + channels[-1-i]  # 256+256, 128+128, 64+64
+            in_channels = channels[-1-i] + channels[-1-i]
             out_channels = channels[-2-i]
             self.decoder_convs.append(nn.ConvTranspose1d(
                 in_channels, out_channels,
@@ -148,8 +115,6 @@ class ConditionalUNet1D(nn.Module):
                 padding=1, output_padding=1
             ))
             self.decoder_res.append(ResidualBlock1D(out_channels, out_channels))
-        
-        # 输出层
         self.final_upsample = nn.Sequential(
             nn.ConvTranspose1d(channels[0], channels[0],
                               kernel_size=3, stride=2,
@@ -160,40 +125,22 @@ class ConditionalUNet1D(nn.Module):
         self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
 
     def forward(self, x, t, date):
-        # 日期周期性编码
-        year, month, day = date[:, 0], date[:, 1], date[:, 2]
-        year_sin = torch.sin(2 * math.pi * year)
-        year_cos = torch.cos(2 * math.pi * year)
-        month_sin = torch.sin(2 * math.pi * month)
-        month_cos = torch.cos(2 * math.pi * month)
-        day_sin = torch.sin(2 * math.pi * day)
-        day_cos = torch.cos(2 * math.pi * day)
-        date_emb = torch.stack([year_sin, year_cos, month_sin, month_cos, day_sin, day_cos], dim=-1)
-        
-        # 条件嵌入
+        # date: [batch_size, 3]，包含归一化的年、月、日
         time_emb = self.time_embed(t)
-        date_emb = self.date_embed(date_emb)
-        combined_cond = time_emb + date_emb
-        
-        # 输入处理
+        date_emb = self.date_embed(date)
+        combined_cond = time_emb + 0.3 * date_emb  # 减弱日期嵌入影响
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
-        
-        # 编码器
         for i, (conv, res, attn) in enumerate(zip(self.encoder_convs, self.encoder_res, self.attentions)):
             x = F.relu(conv(x))
             x = res(x)
             x = attn(x)
             skips.append(x)
-            
-        # 中间层+条件注入
         x = self.mid_conv1(x)
         cond = combined_cond.unsqueeze(-1)
         x = x + cond
         x = self.mid_conv2(x)
-        
-        # 解码器
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
             if x.shape[-1] != skip.shape[-1]:
@@ -201,14 +148,34 @@ class ConditionalUNet1D(nn.Module):
             x = torch.cat([x, skip], dim=1)
             x = F.relu(conv(x))
             x = res(x)
-        
-        # 最终输出
         x = self.final_upsample(x)
         if x.shape[-1] != self.seq_len:
             x = F.interpolate(x, size=self.seq_len, mode='linear', align_corners=False)
         return self.final_conv(x).squeeze(1)
 
-# ===================== 4. 数据管道 =====================
+# 2. Diffusion Process -------------------------------------------------------
+
+class DiffusionProcess:
+    def __init__(self, num_timesteps=1000, device="cpu"):
+        self.num_timesteps = num_timesteps
+        self.device = device
+        self.betas = self._linear_beta_schedule().to(device)
+        self.alphas = 1. - self.betas
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+        self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
+        self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
+    
+    def _linear_beta_schedule(self):
+        return torch.linspace(1e-4, 0.02, self.num_timesteps)
+    
+    def add_noise(self, x0, t):
+        noise = torch.randn_like(x0, device=self.device)
+        sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
+        sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
+        return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
+
+# 3. Data Loading ------------------------------------------------------------
+
 class FinancialDataset(Dataset):
     def __init__(self, data_path):
         data = torch.load(data_path)
@@ -223,20 +190,31 @@ class FinancialDataset(Dataset):
             "sequence": self.sequences[idx],
             "date": self.dates[idx]
         }
+    
+    def get_annual_start_dates(self, years):
+        min_year, max_year = 2017, 2024
+        start_dates = []
+        for year in years:
+            norm_year = (year - min_year) / (max_year - min_year)
+            start_date = torch.tensor([norm_year, 0.0, 0.0], dtype=torch.float32)
+            start_dates.append(start_date)
+        return torch.stack(start_dates)
+    
+    def get_real_sequences_for_year(self, annual_date, num_samples=10):
+        date_diffs = torch.norm(self.dates - annual_date, dim=1)
+        closest_indices = torch.argsort(date_diffs)[:num_samples]
+        return self.sequences[closest_indices], closest_indices
 
+# 4. Loss Functions -----------------------------------------------------------
 
-from statsmodels.tsa.stattools import acf
 def acf_loss(pred, target):
     """Compute MSE loss between ACF of predictions and target."""
-    # 确保批量处理，pred/target: [batch_size, seq_len]
     pred_np = pred.detach().cpu().numpy()  # [batch_size, seq_len]
     target_np = target.detach().cpu().numpy()
     
-    # 计算每批次样本的 ACF
-    pred_acf = np.array([acf(pred_np[i].flatten(), nlags=20, fft=True)[1:] for i in range(pred_np.shape[0])]).mean(axis=0)
-    target_acf = np.array([acf(target_np[i].flatten(), nlags=20, fft=True)[1:] for i in range(target_np.shape[0])]).mean(axis=0)
+    pred_acf = np.array([acf(pred_np[i], nlags=20, fft=True)[1:] for i in range(pred_np.shape[0])]).mean(axis=0)
+    target_acf = np.array([acf(target_np[i], nlags=20, fft=True)[1:] for i in range(target_np.shape[0])]).mean(axis=0)
     
-    # 转换为张量，保留设备
     pred_acf = torch.tensor(pred_acf, device=pred.device, dtype=torch.float32)
     target_acf = torch.tensor(target_acf, device=pred.device, dtype=torch.float32)
     
@@ -248,102 +226,82 @@ def std_loss(pred, target):
     target_std = target.std(dim=-1)  # [batch_size]
     return F.mse_loss(pred_std, target_std)
 
-# ===================== 5. 训练系统 =====================
+def mean_loss(pred, target):
+    """Compute MSE loss between means of predictions and target."""
+    pred_mean = pred.mean(dim=-1)  # [batch_size]
+    target_mean = target.mean(dim=-1)  # [batch_size]
+    return F.mse_loss(pred_mean, target_mean)
+
+# 5. Training Function --------------------------------------------------------
+
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    os.makedirs(config["save_dir"], exist_ok=True)
-    
-    diffusion = DiffusionProcess(num_timesteps=config["num_timesteps"], device=device)
-    model = ConditionalUNet1D(
-        seq_len=config["seq_len"],
-        channels=config["channels"]
-    ).to(device)
-    
-    optimizer = optim.AdamW(model.parameters(), lr=config["lr"])
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["num_epochs"])
-    
+    model = ConditionalUNet1D(seq_len=256).to(device)
+    diffusion = DiffusionProcess(num_timesteps=2000, device=device)
     dataset = FinancialDataset(config["data_path"])
-    dataloader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, num_workers=4)
     
-    for epoch in range(1, config["num_epochs"] + 1):
+    # 均匀采样，无特定日期增强
+    dataloader = DataLoader(
+        dataset,
+        batch_size=config["batch_size"],
+        shuffle=True,
+        num_workers=4
+    )
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["num_epochs"])
+    
+    for epoch in range(config["num_epochs"]):
         model.train()
-        epoch_loss = 0.0
-        
+        total_loss = 0
         for batch in dataloader:
-            x = batch["sequence"].to(device)
-            date = batch["date"].to(device)
+            sequences = batch["sequence"].to(device)
+            dates = batch["date"].to(device)
             
-            t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-            noisy_x, noise = diffusion.add_noise(x, t)
+            t = torch.randint(0, diffusion.num_timesteps, (sequences.size(0),), device=device)
+            noisy_x, noise = diffusion.add_noise(sequences, t)
             
             optimizer.zero_grad()
-            pred_noise = model(noisy_x, t, date)
-            loss = F.mse_loss(pred_noise, noise) + 0.5 * acf_loss(pred_noise, noise) + 0.5 * std_loss(pred_noise, noise)
-            loss.backward()
+            pred_noise = model(noisy_x, t, dates)
             
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            mse_loss = F.mse_loss(pred_noise, noise)
+            acf_loss_val = acf_loss(pred_noise, noise)
+            std_loss_val = std_loss(pred_noise, noise)
+            # mean_loss_val = mean_loss(pred_noise, noise)
+            
+            # 增加损失权重
+            loss = mse_loss + acf_loss_val + std_loss_val # + 0.5 * mean_loss_val
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
             optimizer.step()
-            epoch_loss += loss.item()
+            
+            total_loss += loss.item()
         
         scheduler.step()
+        avg_loss = total_loss / len(dataloader)
+        print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}, "
+              f"MSE: {mse_loss.item():.6f}, ACF: {acf_loss_val.item():.6f}, "
+              f"Std: {std_loss_val.item():.6f}")
         
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"Epoch {epoch:04d} | Loss: {epoch_loss/len(dataloader):.6f} | LR: {scheduler.get_last_lr()[0]:.2e}")
-        
-        if epoch % config["save_every"] == 0:
+        if (epoch + 1) % config["save_interval"] == 0:
             torch.save({
+                'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'epoch': epoch,
-                'loss': epoch_loss/len(dataloader)
-            }, os.path.join(config["save_dir"], f"model_epoch_{epoch}.pth"))
+            }, os.path.join(config["save_dir"], f"model_epoch_{epoch+1}.pth"))
     
-    # 保存最终模型
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'epoch': config["num_epochs"],
-        'loss': epoch_loss/len(dataloader)
-    }, os.path.join(config["save_dir"], "final_model.pth"))
+    torch.save(model.state_dict(), os.path.join(config["save_dir"], "final_model.pth"))
 
-# ===================== 6. 采样函数（模板） =====================
-def sample_model(model, diffusion, num_samples, seq_len, date, device):
-    model.eval()
-    x = torch.randn(num_samples, seq_len, device=device)
-    with torch.no_grad():
-        for t in reversed(range(diffusion.num_timesteps)):
+# 6. Main --------------------------------------------------------------------
 
-            noise_pred = model(x, t, date)
-            alpha = diffusion.alphas[t]
-            alpha_bar = diffusion.alpha_bars[t]
-            x = (x - (1 - alpha) / torch.sqrt(1 - alpha_bar) * noise_pred) / torch.sqrt(alpha)
-            if t > 0:
-                x += torch.sqrt(diffusion.betas[t]) * torch.randn_like(x)
-    return x
-
-# ===================== 7. 主程序 =====================
 if __name__ == "__main__":
     config = {
-        "num_epochs": 1000,
-        "num_timesteps": 1000,
-        "batch_size": 64,
-        "seq_len": 256,
-        "channels": [32, 64, 128, 256],
-        "lr": 2e-4,
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
-        "save_every": 1000
+        "num_epochs": 1000,
+        "batch_size": 62,
+        "lr": 1e-4,
+        "save_interval": 1-00
     }
-    
-    print("验证模型结构...")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    test_model = ConditionalUNet1D(seq_len=256, channels=[32, 64, 128, 256]).to(device)
-    test_input = torch.randn(2, 256).to(device)
-    test_t = torch.randint(0, 1000, (2,), device=device)
-    test_date = torch.randn(2, 3).to(device)
-    output = test_model(test_input, test_t, test_date)
-    print(f"测试通过！输入: {test_input.shape} -> 输出: {output.shape}")
-    assert output.shape == (2, 256)
-    
-    print("\n开始训练...")
+    os.makedirs(config["save_dir"], exist_ok=True)
     train_model(config)

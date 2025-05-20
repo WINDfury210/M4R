@@ -11,8 +11,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
-import math
-
 # 1. Model Definitions --------------------------------------------------------
 
 class TimeEmbedding(nn.Module):
@@ -87,7 +85,7 @@ class ConditionalUNet1D(nn.Module):
         
         self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
         self.date_embed = nn.Sequential(
-            nn.Linear(6, 512),
+            nn.Linear(3, 512),
             nn.ReLU(),
             nn.Linear(512, channels[-1]),
             nn.LayerNorm(channels[-1])
@@ -126,17 +124,9 @@ class ConditionalUNet1D(nn.Module):
         self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
 
     def forward(self, x, t, date):
-        year, month, day = date[:, 0], date[:, 1], date[:, 2]
-        year_sin = torch.sin(2 * math.pi * year)
-        year_cos = torch.cos(2 * math.pi * year)
-        month_sin = torch.sin(2 * math.pi * month)
-        month_cos = torch.cos(2 * math.pi * month)
-        day_sin = torch.sin(2 * math.pi * day)
-        day_cos = torch.cos(2 * math.pi * day)
-        date_emb = torch.stack([year_sin, year_cos, month_sin, month_cos, day_sin, day_cos], dim=-1)
         time_emb = self.time_embed(t)
-        date_emb = self.date_embed(date_emb)
-        combined_cond = time_emb + 0.5 * date_emb  # 减弱日期嵌入影响
+        date_emb = self.date_embed(date)
+        combined_cond = time_emb + 0.3 * date_emb
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
@@ -167,16 +157,14 @@ class DiffusionProcess:
     def __init__(self, num_timesteps=1000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
-        self.betas = self._cosine_beta_schedule().to(device)
+        self.betas = self._linear_beta_schedule().to(device)
         self.alphas = 1. - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
     
-    def _cosine_beta_schedule(self, s=0.008):
-        steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32)
-        f = torch.cos(((steps / self.num_timesteps + s) / (1 + s)) * math.pi / 2) ** 2
-        return torch.clip(1 - f[1:] / f[:-1], 0, 0.999)
+    def _linear_beta_schedule(self):
+        return torch.linspace(1e-4, 0.02, self.num_timesteps)
     
     def add_noise(self, x0, t):
         noise = torch.randn_like(x0, device=self.device)
@@ -218,18 +206,18 @@ class FinancialDataset(Dataset):
 # 4. Validation Core ---------------------------------------------------------
 
 @torch.no_grad()
-def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda", steps=500):
+def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda", steps=200):
     """Generate samples with DDPM sampling"""
     model.eval()
     labels = conditions["date"].repeat(num_samples, 1).to(device)
     year = conditions["date"][0, 0].item() * (2024 - 2017) + 2017
-    noise_scale = 1.5 if year in [2019, 2020, 2021] else 1.0  # 高波动年份用更大尺度
+    noise_scale = 0.4 if year in [2019, 2020, 2021] else 0.2
     x = torch.randn(num_samples, 256, device=device) * noise_scale
     for t in reversed(range(diffusion.num_timesteps)):
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
         
-        if t % 100 == 0:
+        if t % 50 == 0:
             print(f"Step {t}: pred_noise mean={pred_noise.mean().item():.4f}")
         
         alpha_t = diffusion.alphas[t].view(-1, 1)
@@ -240,8 +228,9 @@ def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda",
         if t > 0:
             x = x + torch.sqrt(beta_t) * torch.randn_like(x)
         
-        x = torch.clamp(x, -5, 5)  # 放宽裁剪范围
+        x = torch.clamp(x, -3, 3)
     
+    print(f"Year {year}: Gen mean={x.mean().item():.6f}, std={x.std().item():.6f}")
     return x.cpu()
 
 def calculate_metrics(real_data, generated_data):
@@ -277,32 +266,33 @@ def calculate_metrics(real_data, generated_data):
 def print_enhanced_report(metrics_dict, years):
     print("\n=== Validation Report ===")
     
+    # Global Statistics
     print("\n[Global Statistics]")
-    print(f"{'Metric':<10} {'Real':>10} {'Gen':>10} {'Diff':>10} {'Z-score':>10}")
-    print("-" * 45)
+    print(f"{'Metric':<10} {'Diff':>10} {'Z-score':>10}")
+    print("-" * 32)
     global_stats = metrics_dict['global']
     z_score_mean = (global_stats['gen_mean'] - global_stats['real_mean']) / global_stats['real_std']
     z_score_std = (global_stats['gen_std'] - global_stats['real_std']) / global_stats['real_std']
-    print(f"{'Mean':<10} {global_stats['real_mean']:>10.6f} {global_stats['gen_mean']:>10.6f} "
-          f"{abs(global_stats['gen_mean']-global_stats['real_mean']):>10.6f} {z_score_mean:>10.2f}")
-    print(f"{'Std Dev':<10} {global_stats['real_std']:>10.6f} {global_stats['gen_std']:>10.6f} "
-          f"{abs(global_stats['gen_std']-global_stats['real_std']):>10.6f} {z_score_std:>10.2f}")
-    print(f"{'Corr':<10} {global_stats['real_corr']:>10.6f} {global_stats['gen_corr']:>10.6f} "
-          f"{abs(global_stats['gen_corr']-global_stats['real_corr']):>10.6f} {'-':>10}")
-    print(f"{'Autocorr':<10} {global_stats['real_acf']:>10.6f} {global_stats['gen_acf']:>10.6f} "
-          f"{abs(global_stats['gen_acf']-global_stats['real_acf']):>10.6f} {'-':>10}")
+    print(f"{'Mean':<10} {abs(global_stats['gen_mean']-global_stats['real_mean']):>10.6f} {z_score_mean:>10.2f}")
+    print(f"{'Std Dev':<10} {abs(global_stats['gen_std']-global_stats['real_std']):>10.6f} {z_score_std:>10.2f}")
+    print(f"{'Corr':<10} {abs(global_stats['gen_corr']-global_stats['real_corr']):>10.6f} {'-':>10}")
+    print(f"{'Autocorr':<10} {abs(global_stats['gen_acf']-global_stats['real_acf']):>10.6f} {'-':>10}")
     
+    # Per-Sample Statistics (First 3 samples per year)
     print("\n[Per-Sample Statistics]")
+    print(f"{'Year':<6} {'Sample':<8} {'Mean Diff':>10} {'Std Diff':>10} {'Corr Diff':>10} {'Acf Diff':>10}")
+    print("-" * 54)
     for year in years:
-        print(f"\nYear {year}:")
-        print(f"{'Sample':<8} {'Metric':<10} {'Real':>10} {'Gen':>10} {'Diff %':>10}")
-        print("-" * 45)
-        for i, sample_metrics in enumerate(metrics_dict[f'year_{year}']):
+        for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
+            diff_values = []
             for metric in ['mean', 'std', 'corr', 'acf']:
                 real_key = f'real_{metric}'
                 gen_key = f'gen_{metric}'
-                diff_percent = abs(sample_metrics[gen_key] - sample_metrics[real_key]) / abs(sample_metrics[real_key]) * 100 if sample_metrics[real_key] != 0 else 0
-                print(f"{i+1:<8} {metric.capitalize():<10} {sample_metrics[real_key]:>10.6f} {sample_metrics[gen_key]:>10.6f} {diff_percent:>10.2f}%")
+                diff = abs(sample_metrics[gen_key] - sample_metrics[real_key])
+                # 高亮阈值：Std 和 Corr > 0.1，Mean 和 Acf > 0.01
+                threshold = 0.01 if metric in ['mean', 'acf'] else 0.1
+                diff_values.append(f"{diff:>8.6f}{'*' if diff > threshold else ''}")
+            print(f"{year:<6} {i+1:<8} {diff_values[0]:>10} {diff_values[1]:>10} {diff_values[2]:>10} {diff_values[3]:>10}")
 
 def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     os.makedirs(output_dir, exist_ok=True)
