@@ -14,8 +14,29 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import math
 
-# 1. Model Definitions --------------------------------------------------------
+class DiffusionProcess:
+    def __init__(self, num_timesteps=1000, device="cpu"):
+        self.num_timesteps = num_timesteps
+        self.device = device
+        
+        self.betas = self._cosine_beta_schedule().to(device)
+        self.alphas = 1. - self.betas
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+        self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
+        self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
+    
+    def _cosine_beta_schedule(self, s=0.008):
+        steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32)
+        f = torch.cos(((steps / self.num_timesteps + s) / (1 + s)) * math.pi / 2) ** 2
+        return torch.clip(1 - f[1:] / f[:-1], 0, 0.999)
+    
+    def add_noise(self, x0, t):
+        noise = torch.randn_like(x0, device=self.device)
+        sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
+        sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
+        return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
+# ===================== 2. 网络组件 =====================
 class TimeEmbedding(nn.Module):
     def __init__(self, dim, embedding_type="sinusoidal", hidden_dim=1024):
         super().__init__()
@@ -79,6 +100,7 @@ class ResidualBlock1D(nn.Module):
         out += residual
         return self.relu(out)
 
+# ===================== 3. 条件UNet =====================
 class ConditionalUNet1D(nn.Module):
     def __init__(self, seq_len=256, channels=[32, 64, 128, 256]):
         super().__init__()
@@ -86,10 +108,10 @@ class ConditionalUNet1D(nn.Module):
         self.channels = channels
         self.num_levels = len(channels)
         
-        # Time embedding (output channels[-1] = 256)
+        # 时间嵌入
         self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
         
-        # Date embedding (6D periodic encoding -> channels[-1] = 256)
+        # 日期嵌入（添加 LayerNorm）
         self.date_embed = nn.Sequential(
             nn.Linear(6, 512),
             nn.ReLU(),
@@ -97,10 +119,10 @@ class ConditionalUNet1D(nn.Module):
             nn.LayerNorm(channels[-1])
         )
         
-        # Input layer
+        # 输入层
         self.input_conv = nn.Conv1d(1, channels[0], kernel_size=3, padding=1)
         
-        # Encoder
+        # 编码器
         self.encoder_convs = nn.ModuleList()
         self.encoder_res = nn.ModuleList()
         self.attentions = nn.ModuleList()
@@ -112,15 +134,15 @@ class ConditionalUNet1D(nn.Module):
             self.attentions.append(SelfAttention1D(out_channels) if i in [1, 2, 3] else nn.Identity())
             in_channels = out_channels
         
-        # Middle layer
+        # 中间层
         self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
         self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
         
-        # Decoder
+        # 解码器
         self.decoder_convs = nn.ModuleList()
         self.decoder_res = nn.ModuleList()
         for i in range(len(channels)-1):
-            in_channels = channels[-1-i] + channels[-2-i]
+            in_channels = channels[-1-i] + channels[-1-i]  # 256+256, 128+128, 64+64
             out_channels = channels[-2-i]
             self.decoder_convs.append(nn.ConvTranspose1d(
                 in_channels, out_channels,
@@ -129,7 +151,7 @@ class ConditionalUNet1D(nn.Module):
             ))
             self.decoder_res.append(ResidualBlock1D(out_channels, out_channels))
         
-        # Output layer
+        # 输出层
         self.final_upsample = nn.Sequential(
             nn.ConvTranspose1d(channels[0], channels[0],
                               kernel_size=3, stride=2,
@@ -140,7 +162,7 @@ class ConditionalUNet1D(nn.Module):
         self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
 
     def forward(self, x, t, date):
-        # Date periodic encoding
+        # 日期周期性编码
         year, month, day = date[:, 0], date[:, 1], date[:, 2]
         year_sin = torch.sin(2 * math.pi * year)
         year_cos = torch.cos(2 * math.pi * year)
@@ -150,65 +172,43 @@ class ConditionalUNet1D(nn.Module):
         day_cos = torch.cos(2 * math.pi * day)
         date_emb = torch.stack([year_sin, year_cos, month_sin, month_cos, day_sin, day_cos], dim=-1)
         
-        # Condition embeddings
+        # 条件嵌入
         time_emb = self.time_embed(t)
         date_emb = self.date_embed(date_emb)
         combined_cond = time_emb + date_emb
         
-        # Input processing
+        # 输入处理
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
         
-        # Encoder
+        # 编码器
         for i, (conv, res, attn) in enumerate(zip(self.encoder_convs, self.encoder_res, self.attentions)):
             x = F.relu(conv(x))
             x = res(x)
             x = attn(x)
             skips.append(x)
-        
-        # Middle layer + condition injection
+            
+        # 中间层+条件注入
         x = self.mid_conv1(x)
         cond = combined_cond.unsqueeze(-1)
         x = x + cond
         x = self.mid_conv2(x)
         
-        # Decoder
+        # 解码器
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
+            if x.shape[-1] != skip.shape[-1]:
+                x = F.interpolate(x, size=skip.shape[-1], mode='linear', align_corners=False)
             x = torch.cat([x, skip], dim=1)
             x = F.relu(conv(x))
             x = res(x)
         
-        # Final output
+        # 最终输出
         x = self.final_upsample(x)
         if x.shape[-1] != self.seq_len:
             x = F.interpolate(x, size=self.seq_len, mode='linear', align_corners=False)
         return self.final_conv(x).squeeze(1)
-
-# 2. Diffusion Process -------------------------------------------------------
-
-class DiffusionProcess:
-    def __init__(self, num_timesteps=1000, device="cpu"):
-        self.num_timesteps = num_timesteps
-        self.device = device
-        
-        self.betas = self._cosine_beta_schedule().to(device)
-        self.alphas = 1. - self.betas
-        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
-        self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
-        self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
-    
-    def _cosine_beta_schedule(self, s=0.008):
-        steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32)
-        f = torch.cos(((steps / self.num_timesteps + s) / (1 + s)) * math.pi / 2) ** 2
-        return torch.clip(1 - f[1:] / f[:-1], 0, 0.999)
-    
-    def add_noise(self, x0, t):
-        noise = torch.randn_like(x0, device=self.device)
-        sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
-        sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
-        return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
 # 3. Data Loading ------------------------------------------------------------
 
