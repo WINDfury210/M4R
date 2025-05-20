@@ -12,7 +12,8 @@ class DiffusionProcess:
         self.num_timesteps = num_timesteps
         self.device = device
         
-        self.betas = self._cosine_beta_schedule().to(device)
+        # self.betas = self._cosine_beta_schedule().to(device)
+        self.betas = self._linear_beta_schedule().to(device)
         self.alphas = 1. - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
@@ -22,6 +23,9 @@ class DiffusionProcess:
         steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32)
         f = torch.cos(((steps / self.num_timesteps + s) / (1 + s)) * math.pi / 2) ** 2
         return torch.clip(1 - f[1:] / f[:-1], 0, 0.999)
+    
+    def _linear_beta_schedule(self):
+        return torch.linspace(1e-4, 0.02, self.num_timesteps)
     
     def add_noise(self, x0, t):
         noise = torch.randn_like(x0, device=self.device)
@@ -219,6 +223,18 @@ class FinancialDataset(Dataset):
             "date": self.dates[idx]
         }
 
+
+from statsmodels.tsa.stattools import acf
+def acf_loss(pred, target):
+    pred_acf = acf(pred.cpu().numpy().flatten(), nlags=20, fft=True)[1:]
+    target_acf = acf(target.cpu().numpy().flatten(), nlags=20, fft=True)[1:]
+    return F.mse_loss(torch.tensor(pred_acf, device=pred.device), torch.tensor(target_acf, device=pred.device))
+
+def std_loss(pred, target):
+    pred_std = pred.std(dim=-1)
+    target_std = target.std(dim=-1)
+    return F.mse_loss(pred_std, target_std)
+
 # ===================== 5. 训练系统 =====================
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -249,7 +265,7 @@ def train_model(config):
             
             optimizer.zero_grad()
             pred_noise = model(noisy_x, t, date)
-            loss = F.mse_loss(pred_noise, noise)
+            loss = F.mse_loss(pred_noise, noise) + 0.5 * acf_loss(pred_noise, noise) + 0.5 * std_loss(pred_noise, noise)
             loss.backward()
             
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -303,7 +319,7 @@ if __name__ == "__main__":
         "lr": 2e-4,
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
-        "save_every": 200
+        "save_every": 1000
     }
     
     print("验证模型结构...")
