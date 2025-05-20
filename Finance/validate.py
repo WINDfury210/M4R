@@ -136,7 +136,7 @@ class ConditionalUNet1D(nn.Module):
         date_emb = torch.stack([year_sin, year_cos, month_sin, month_cos, day_sin, day_cos], dim=-1)
         time_emb = self.time_embed(t)
         date_emb = self.date_embed(date_emb)
-        combined_cond = time_emb + date_emb
+        combined_cond = time_emb + 0.5 * date_emb  # 减弱日期嵌入影响
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
@@ -218,11 +218,13 @@ class FinancialDataset(Dataset):
 # 4. Validation Core ---------------------------------------------------------
 
 @torch.no_grad()
-def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda", steps=1000):
+def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda", steps=500):
     """Generate samples with DDPM sampling"""
     model.eval()
     labels = conditions["date"].repeat(num_samples, 1).to(device)
-    x = torch.randn(num_samples, 256, device=device) * 1.0  # 噪声尺度 1.0
+    year = conditions["date"][0, 0].item() * (2024 - 2017) + 2017
+    noise_scale = 1.5 if year in [2019, 2020, 2021] else 1.0  # 高波动年份用更大尺度
+    x = torch.randn(num_samples, 256, device=device) * noise_scale
     for t in reversed(range(diffusion.num_timesteps)):
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
@@ -238,16 +240,7 @@ def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda",
         if t > 0:
             x = x + torch.sqrt(beta_t) * torch.randn_like(x)
         
-        x = torch.clamp(x, -3, 3)
-        
-        if t % 100 == 0:
-            os.makedirs("validation_results/sequences", exist_ok=True)
-            plt.figure(figsize=(10, 4))
-            plt.plot(x[0].cpu().numpy(), label="Generated")
-            plt.title(f"Intermediate Sequence (Step {t}, Year {conditions['date'][0, 0] * 7 + 2017:.0f})")
-            plt.legend()
-            plt.savefig(f"validation_results/sequences/step_{t}_year_{conditions['date'][0, 0] * 7 + 2017:.0f}.png")
-            plt.close()
+        x = torch.clamp(x, -5, 5)  # 放宽裁剪范围
     
     return x.cpu()
 
@@ -390,4 +383,3 @@ if __name__ == "__main__":
         model_path="saved_models/final_model.pth",
         data_path="financial_data/sequences/sequences_256.pt"
     )
-    
