@@ -1,6 +1,6 @@
 """
 Diffusion Model Validation Script
-Generate 10 sequences per year (2017-2024) and compute metrics
+Generate 10 sequences per year (2017-2024) and compute per-sample metrics
 """
 
 import json
@@ -10,33 +10,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 import math
 
-class DiffusionProcess:
-    def __init__(self, num_timesteps=1000, device="cpu"):
-        self.num_timesteps = num_timesteps
-        self.device = device
-        
-        self.betas = self._cosine_beta_schedule().to(device)
-        self.alphas = 1. - self.betas
-        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
-        self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
-        self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
-    
-    def _cosine_beta_schedule(self, s=0.008):
-        steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32)
-        f = torch.cos(((steps / self.num_timesteps + s) / (1 + s)) * math.pi / 2) ** 2
-        return torch.clip(1 - f[1:] / f[:-1], 0, 0.999)
-    
-    def add_noise(self, x0, t):
-        noise = torch.randn_like(x0, device=self.device)
-        sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
-        sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
-        return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
+# 1. Model Definitions --------------------------------------------------------
 
-# ===================== 2. 网络组件 =====================
 class TimeEmbedding(nn.Module):
     def __init__(self, dim, embedding_type="sinusoidal", hidden_dim=1024):
         super().__init__()
@@ -100,7 +78,6 @@ class ResidualBlock1D(nn.Module):
         out += residual
         return self.relu(out)
 
-# ===================== 3. 条件UNet =====================
 class ConditionalUNet1D(nn.Module):
     def __init__(self, seq_len=256, channels=[32, 64, 128, 256]):
         super().__init__()
@@ -108,21 +85,14 @@ class ConditionalUNet1D(nn.Module):
         self.channels = channels
         self.num_levels = len(channels)
         
-        # 时间嵌入
         self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
-        
-        # 日期嵌入（添加 LayerNorm）
         self.date_embed = nn.Sequential(
             nn.Linear(6, 512),
             nn.ReLU(),
             nn.Linear(512, channels[-1]),
             nn.LayerNorm(channels[-1])
         )
-        
-        # 输入层
         self.input_conv = nn.Conv1d(1, channels[0], kernel_size=3, padding=1)
-        
-        # 编码器
         self.encoder_convs = nn.ModuleList()
         self.encoder_res = nn.ModuleList()
         self.attentions = nn.ModuleList()
@@ -133,16 +103,12 @@ class ConditionalUNet1D(nn.Module):
             self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
             self.attentions.append(SelfAttention1D(out_channels) if i in [1, 2, 3] else nn.Identity())
             in_channels = out_channels
-        
-        # 中间层
         self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
         self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
-        
-        # 解码器
         self.decoder_convs = nn.ModuleList()
         self.decoder_res = nn.ModuleList()
         for i in range(len(channels)-1):
-            in_channels = channels[-1-i] + channels[-1-i]  # 256+256, 128+128, 64+64
+            in_channels = channels[-1-i] + channels[-1-i]
             out_channels = channels[-2-i]
             self.decoder_convs.append(nn.ConvTranspose1d(
                 in_channels, out_channels,
@@ -150,8 +116,6 @@ class ConditionalUNet1D(nn.Module):
                 padding=1, output_padding=1
             ))
             self.decoder_res.append(ResidualBlock1D(out_channels, out_channels))
-        
-        # 输出层
         self.final_upsample = nn.Sequential(
             nn.ConvTranspose1d(channels[0], channels[0],
                               kernel_size=3, stride=2,
@@ -162,7 +126,6 @@ class ConditionalUNet1D(nn.Module):
         self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
 
     def forward(self, x, t, date):
-        # 日期周期性编码
         year, month, day = date[:, 0], date[:, 1], date[:, 2]
         year_sin = torch.sin(2 * math.pi * year)
         year_cos = torch.cos(2 * math.pi * year)
@@ -171,31 +134,21 @@ class ConditionalUNet1D(nn.Module):
         day_sin = torch.sin(2 * math.pi * day)
         day_cos = torch.cos(2 * math.pi * day)
         date_emb = torch.stack([year_sin, year_cos, month_sin, month_cos, day_sin, day_cos], dim=-1)
-        
-        # 条件嵌入
         time_emb = self.time_embed(t)
         date_emb = self.date_embed(date_emb)
         combined_cond = time_emb + date_emb
-        
-        # 输入处理
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
-        
-        # 编码器
         for i, (conv, res, attn) in enumerate(zip(self.encoder_convs, self.encoder_res, self.attentions)):
             x = F.relu(conv(x))
             x = res(x)
             x = attn(x)
             skips.append(x)
-            
-        # 中间层+条件注入
         x = self.mid_conv1(x)
         cond = combined_cond.unsqueeze(-1)
         x = x + cond
         x = self.mid_conv2(x)
-        
-        # 解码器
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
             if x.shape[-1] != skip.shape[-1]:
@@ -203,12 +156,33 @@ class ConditionalUNet1D(nn.Module):
             x = torch.cat([x, skip], dim=1)
             x = F.relu(conv(x))
             x = res(x)
-        
-        # 最终输出
         x = self.final_upsample(x)
         if x.shape[-1] != self.seq_len:
             x = F.interpolate(x, size=self.seq_len, mode='linear', align_corners=False)
         return self.final_conv(x).squeeze(1)
+
+# 2. Diffusion Process -------------------------------------------------------
+
+class DiffusionProcess:
+    def __init__(self, num_timesteps=1000, device="cpu"):
+        self.num_timesteps = num_timesteps
+        self.device = device
+        self.betas = self._cosine_beta_schedule().to(device)
+        self.alphas = 1. - self.betas
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+        self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
+        self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
+    
+    def _cosine_beta_schedule(self, s=0.008):
+        steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32)
+        f = torch.cos(((steps / self.num_timesteps + s) / (1 + s)) * math.pi / 2) ** 2
+        return torch.clip(1 - f[1:] / f[:-1], 0, 0.999)
+    
+    def add_noise(self, x0, t):
+        noise = torch.randn_like(x0, device=self.device)
+        sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
+        sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
+        return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
 # 3. Data Loading ------------------------------------------------------------
 
@@ -228,30 +202,25 @@ class FinancialDataset(Dataset):
         }
     
     def get_annual_start_dates(self, years):
-        """Generate normalized start dates for given years (Jan 1)"""
         min_year, max_year = 2017, 2024
         start_dates = []
         for year in years:
-            # Normalize year to [0, 1] based on 2017-2024
             norm_year = (year - min_year) / (max_year - min_year)
             start_date = torch.tensor([norm_year, 0.0, 0.0], dtype=torch.float32)
             start_dates.append(start_date)
-        return torch.stack(start_dates)  # [num_years, 3]
+        return torch.stack(start_dates)
     
     def get_real_sequences_for_year(self, annual_date, num_samples=10):
-        """Find num_samples real sequences closest to annual_date"""
         date_diffs = torch.norm(self.dates - annual_date, dim=1)
         closest_indices = torch.argsort(date_diffs)[:num_samples]
         return self.sequences[closest_indices], closest_indices
 
 # 4. Validation Core ---------------------------------------------------------
 
-# 在 validate.py 中修改以下部分
 def generate_samples(model, diffusion, conditions, num_samples=1, steps=100, device="cuda"):
-    """Generate samples with DDIM sampling"""
     with torch.no_grad():
         dates = conditions["date"].repeat(num_samples, 1).to(device)
-        samples = torch.randn(num_samples, 256, device=device) * 0.1  # 增加噪声尺度
+        samples = torch.randn(num_samples, 256, device=device) * 0.5
         skip = diffusion.num_timesteps // steps
         for t in reversed(range(0, diffusion.num_timesteps, skip)):
             times = torch.full((num_samples,), t, device=device, dtype=torch.long)
@@ -264,7 +233,6 @@ def generate_samples(model, diffusion, conditions, num_samples=1, steps=100, dev
         return samples.cpu()
 
 def calculate_metrics(real_data, generated_data):
-    """Calculate metrics for single or multiple sequences"""
     from statsmodels.tsa.stattools import acf
     metrics = {}
     
@@ -280,99 +248,59 @@ def calculate_metrics(real_data, generated_data):
     
     real_data_np = real_data.numpy()
     gen_data_np = generated_data.numpy()
-    if real_data_np.shape[0] > 1:
-        real_corr = np.corrcoef(real_data_np, rowvar=False)
-        gen_corr = np.corrcoef(gen_data_np, rowvar=False)
-        metrics['real_corr'] = np.abs(real_corr).mean()
-        metrics['gen_corr'] = np.abs(gen_corr).mean()
-    else:
-        real_lagged = real_data_np[:, :-1]
-        real_next = real_data_np[:, 1:]
-        gen_lagged = gen_data_np[:, :-1]
-        gen_next = gen_data_np[:, 1:]
-        metrics['real_corr'] = np.corrcoef(real_lagged.flatten(), real_next.flatten())[0, 1]
-        metrics['gen_corr'] = np.corrcoef(gen_lagged.flatten(), gen_next.flatten())[0, 1]
+    real_lagged = real_data_np[:, :-1]
+    real_next = real_data_np[:, 1:]
+    gen_lagged = gen_data_np[:, :-1]
+    gen_next = gen_data_np[:, 1:]
+    metrics['real_corr'] = np.corrcoef(real_lagged.flatten(), real_next.flatten())[0, 1]
+    metrics['gen_corr'] = np.corrcoef(gen_lagged.flatten(), gen_next.flatten())[0, 1]
     
     real_acf = acf(real_data_np.flatten(), nlags=20, fft=True)[1:].mean()
     gen_acf = acf(gen_data_np.flatten(), nlags=20, fft=True)[1:].mean()
     metrics['real_acf'] = real_acf
     metrics['gen_acf'] = gen_acf
     
-    real_hist = np.histogram(real_data_np.flatten(), bins=50, density=True)[0]
-    gen_hist = np.histogram(gen_data_np.flatten(), bins=50, density=True)[0]
-    metrics['kl_div'] = F.kl_div(
-        torch.from_numpy(gen_hist + 1e-10).log(),
-        torch.from_numpy(real_hist + 1e-10),
-        reduction='batchmean'
-    ).item()
-    
     return metrics
 
 def print_enhanced_report(metrics_dict, years):
-    """Enhanced report with per-year average metrics"""
-    print("\n=== Enhanced Validation Report ===")
+    print("\n=== Validation Report ===")
     
-    # Global Statistics
     print("\n[Global Statistics]")
-    print(f"{'Metric':<15} | {'Real':>12} | {'Generated':>12} | {'Difference':>12} | {'Z-score':>10}")
-    print("-" * 70)
+    print(f"{'Metric':<10} {'Real':>10} {'Gen':>10} {'Diff':>10} {'Z-score':>10}")
+    print("-" * 45)
     global_stats = metrics_dict['global']
     z_score_mean = (global_stats['gen_mean'] - global_stats['real_mean']) / global_stats['real_std']
     z_score_std = (global_stats['gen_std'] - global_stats['real_std']) / global_stats['real_std']
+    print(f"{'Mean':<10} {global_stats['real_mean']:>10.6f} {global_stats['gen_mean']:>10.6f} "
+          f"{abs(global_stats['gen_mean']-global_stats['real_mean']):>10.6f} {z_score_mean:>10.2f}")
+    print(f"{'Std Dev':<10} {global_stats['real_std']:>10.6f} {global_stats['gen_std']:>10.6f} "
+          f"{abs(global_stats['gen_std']-global_stats['real_std']):>10.6f} {z_score_std:>10.2f}")
+    print(f"{'Corr':<10} {global_stats['real_corr']:>10.6f} {global_stats['gen_corr']:>10.6f} "
+          f"{abs(global_stats['gen_corr']-global_stats['real_corr']):>10.6f} {'-':>10}")
+    print(f"{'Autocorr':<10} {global_stats['real_acf']:>10.6f} {global_stats['gen_acf']:>10.6f} "
+          f"{abs(global_stats['gen_acf']-global_stats['real_acf']):>10.6f} {'-':>10}")
     
-    print(f"{'Mean':<15} | {global_stats['real_mean']:>12.6f} | {global_stats['gen_mean']:>12.6f} | "
-          f"{abs(global_stats['gen_mean']-global_stats['real_mean']):>12.6f} | {z_score_mean:>10.2f}")
-    print(f"{'Std Dev':<15} | {global_stats['real_std']:>12.6f} | {global_stats['gen_std']:>12.6f} | "
-          f"{abs(global_stats['gen_std']-global_stats['real_std']):>12.6f} | {z_score_std:>10.2f}")
-    print(f"{'Correlation':<15} | {global_stats['real_corr']:>12.6f} | {global_stats['gen_corr']:>12.6f} | "
-          f"{abs(global_stats['gen_corr']-global_stats['real_corr']):>12.6f} | {'-':>10}")
-    print(f"{'Autocorr':<15} | {global_stats['real_acf']:>12.6f} | {global_stats['gen_acf']:>12.6f} | "
-          f"{abs(global_stats['gen_acf']-global_stats['real_acf']):>12.6f} | {'-':>10}")
-    
-    # Per-Year Statistics (average of 10 groups)
-    print("\n[Per-Year Statistics (Average of 10 Groups)]")
+    print("\n[Per-Sample Statistics]")
     for year in years:
-        year_metrics = metrics_dict[f'year_{year}']
-        z_mean = (year_metrics['gen_mean'] - year_metrics['real_mean']) / year_metrics['real_std']
-        z_std = (year_metrics['gen_std'] - year_metrics['real_std']) / year_metrics['real_std']
-        
         print(f"\nYear {year}:")
-        print(f"{'Metric':<15} | {'Real':>12} | {'Generated':>12} | {'Diff %':>11} | {'Z-score':>10}")
-        print("-" * 70)
-        print(f"{'Mean':<15} | {year_metrics['real_mean']:>12.6f} | {year_metrics['gen_mean']:>12.6f} | "
-              f"{abs(year_metrics['gen_mean']-year_metrics['real_mean'])/year_metrics['real_mean']*100:>11.2f}% | {z_mean:>10.2f}")
-        print(f"{'Std Dev':<15} | {year_metrics['real_std']:>12.6f} | {year_metrics['gen_std']:>12.6f} | "
-              f"{abs(year_metrics['gen_std']-year_metrics['real_std'])/year_metrics['real_std']*100:>11.2f}% | {z_std:>10.2f}")
-        print(f"{'Correlation':<15} | {year_metrics['real_corr']:>12.6f} | {year_metrics['gen_corr']:>12.6f} | {'-':>11} | {'-':>10}")
-        print(f"{'Autocorr':<15} | {year_metrics['real_acf']:>12.6f} | {year_metrics['gen_acf']:>12.6f} | {'-':>11} | {'-':>10}")
-    
-    # Issue Diagnostics
-    print("\n[Issue Diagnostics]")
-    if global_stats['gen_std'] > global_stats['real_std'] * 1.5:
-        print("⚠️ Excessive global volatility: Check noise schedule or reduce initial noise scale")
-    if abs(z_score_mean) > 3:
-        print("⚠️ Significant global mean shift: Check condition injection or model bias")
-    if global_stats['gen_corr'] < global_stats['real_corr'] * 0.5:
-        print("⚠️ Low global correlation: Consider increasing model capacity")
-    if abs(global_stats['gen_acf'] - global_stats['real_acf']) > 0.1:
-        print("⚠️ Global autocorrelation mismatch: Check temporal modeling")
-
+        print(f"{'Sample':<8} {'Metric':<10} {'Real':>10} {'Gen':>10} {'Diff %':>10}")
+        print("-" * 45)
+        for i, sample_metrics in enumerate(metrics_dict[f'year_{year}']):
+            for metric in ['mean', 'std', 'corr', 'acf']:
+                real_key = f'real_{metric}'
+                gen_key = f'gen_{metric}'
+                diff_percent = abs(sample_metrics[gen_key] - sample_metrics[real_key]) / abs(sample_metrics[real_key]) * 100 if sample_metrics[real_key] != 0 else 0
+                print(f"{i+1:<8} {metric.capitalize():<10} {sample_metrics[real_key]:>10.6f} {sample_metrics[gen_key]:>10.6f} {diff_percent:>10.2f}%")
 
 def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
-    """Save visualizations and metrics for a specific year"""
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Save metrics
     with open(os.path.join(output_dir, f'metrics_{year}.json'), 'w') as f:
         json.dump(metrics, f, indent=2)
-    
-    # Sample comparison plot (first 3 groups)
     plt.figure(figsize=(15, 5))
     for i in range(min(3, len(real_samples))):
         plt.subplot(2, 3, i+1)
         plt.plot(real_samples[i].numpy())
         plt.title(f"Real Sample {i+1} (Year {year})")
-        
         plt.subplot(2, 3, i+4)
         plt.plot(gen_samples[i].numpy())
         plt.title(f"Generated Sample {i+1} (Year {year})")
@@ -383,101 +311,61 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
 # 5. Main Validation Function ------------------------------------------------
 
 def run_validation(model_path, data_path, output_dir="validation_results"):
-    """Generate 10 sequences per year (2017-2024) and compute metrics"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Initialize components
     diffusion = DiffusionProcess(device=device)
     model = ConditionalUNet1D(seq_len=256).to(device)
-    
-    # Load model
     checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+    else:
+        model.load_state_dict(checkpoint, strict=True)
     model.eval()
-    
     dataset = FinancialDataset(data_path)
     dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
-    
-    # Define years
-    years = list(range(2017, 2025))  # 2017 to 2024
+    years = list(range(2017, 2025))
     num_groups_per_year = 10
-    
-    # Get annual start dates
-    annual_dates = dataset.get_annual_start_dates(years)  # [8, 3]
-    
-    # Storage for results
+    annual_dates = dataset.get_annual_start_dates(years)
     metrics = {}
     all_gen_samples = []
     all_real_samples = []
+    real_all = torch.cat([batch["sequence"] for batch in dataloader], dim=0)
     
-    # Process each year
     for year_idx, year in enumerate(years):
         annual_date = annual_dates[year_idx].to(device)
         condition = {"date": annual_date.unsqueeze(0)}
-        
-        # Get real sequences for this year
-        real_sequences, _ = dataset.get_real_sequences_for_year(
+        real_sequences, real_indices = dataset.get_real_sequences_for_year(
             annual_date.cpu(), num_samples=num_groups_per_year
         )
-        
-        # Generate 10 groups and compute metrics
-
         year_metrics_list = []
         year_gen_samples = []
         year_real_samples = []
-        
-        # 批量生成 10 组
         gen_data = generate_samples(
             model, diffusion, condition,
-            num_samples=10,
+            num_samples=num_groups_per_year,
             device=device
         )
         for group_idx in range(num_groups_per_year):
             group_data = gen_data[group_idx:group_idx+1]
             real_data = real_sequences[group_idx].unsqueeze(0)
-            
             group_metrics = calculate_metrics(real_data, group_data)
             year_metrics_list.append(group_metrics)
-            
             if group_idx < 3:
                 year_real_samples.append(real_data.squeeze())
                 year_gen_samples.append(group_data.squeeze())
-            
             all_gen_samples.append(group_data)
             all_real_samples.append(real_data)
-        
-        # Compute average metrics for the year
-        year_metrics = {
-            'real_mean': np.mean([m['real_mean'] for m in year_metrics_list]),
-            'gen_mean': np.mean([m['gen_mean'] for m in year_metrics_list]),
-            'real_std': np.mean([m['real_std'] for m in year_metrics_list]),
-            'gen_std': np.mean([m['gen_std'] for m in year_metrics_list]),
-            'real_corr': np.mean([m['real_corr'] for m in year_metrics_list]),
-            'gen_corr': np.mean([m['gen_corr'] for m in year_metrics_list]),
-            'real_acf': np.mean([m['real_acf'] for m in year_metrics_list]),
-            'gen_acf': np.mean([m['gen_acf'] for m in year_metrics_list]),
-            'kl_div': np.mean([m['kl_div'] for m in year_metrics_list])
-        }
-        metrics[f'year_{year}'] = year_metrics
-        
-        # Save visualizations and metrics for this year
-        save_visualizations(year_real_samples, year_gen_samples, year_metrics, year, output_dir)
+        metrics[f'year_{year}'] = year_metrics_list
+        save_visualizations(year_real_samples, year_gen_samples, year_metrics_list, year, output_dir)
+        print(f"Generated samples for year {year}")
     
-    # Compute global metrics
     gen_all = torch.cat(all_gen_samples, dim=0)
     real_all_subset = torch.cat(all_real_samples, dim=0)
     metrics['global'] = calculate_metrics(real_all_subset, gen_all)
-    
-    # Save global metrics
-    with open(os.path.join(output_dir, 'metrics_global.json'), 'w') as f:
-        json.dump(metrics['global'], f, indent=2)
-    
-    # Print report
     print_enhanced_report(metrics, years)
     print(f"\nValidation complete! Results saved to {output_dir}")
 
 if __name__ == "__main__":
     run_validation(
-        model_path="saved_models/model_epoch_1000.pth",
+        model_path="saved_models/final_model.pth",
         data_path="financial_data/sequences/sequences_256.pt"
     )
