@@ -1,6 +1,6 @@
 """
 Diffusion Model Validation Script
-Generate 10 sequences per year (2017-2024) and compute per-sample metrics
+Generate 10 sequences per year (2017-2024) with DDPM and compute per-sample metrics
 """
 
 import json
@@ -217,20 +217,39 @@ class FinancialDataset(Dataset):
 
 # 4. Validation Core ---------------------------------------------------------
 
-def generate_samples(model, diffusion, conditions, num_samples=1, steps=100, device="cuda"):
-    with torch.no_grad():
-        dates = conditions["date"].repeat(num_samples, 1).to(device)
-        samples = torch.randn(num_samples, 256, device=device) * 0.5
-        skip = diffusion.num_timesteps // steps
-        for t in reversed(range(0, diffusion.num_timesteps, skip)):
-            times = torch.full((num_samples,), t, device=device, dtype=torch.long)
-            pred_noise = model(samples, times, dates)
-            alpha_bar = diffusion.alpha_bars[t]
-            alpha_bar_prev = diffusion.alpha_bars[max(t-skip, 0)]
-            x0_pred = (samples - (1 - alpha_bar).sqrt() * pred_noise) / alpha_bar.sqrt()
-            samples = alpha_bar_prev.sqrt() * x0_pred + (1 - alpha_bar_prev).sqrt() * pred_noise
-        samples = torch.clamp(samples, min=-3, max=3)
-        return samples.cpu()
+@torch.no_grad()
+def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda", steps=1000):
+    """Generate samples with DDPM sampling"""
+    model.eval()
+    labels = conditions["date"].repeat(num_samples, 1).to(device)
+    x = torch.randn(num_samples, 256, device=device) * 1.0  # 噪声尺度 1.0
+    for t in reversed(range(diffusion.num_timesteps)):
+        t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
+        pred_noise = model(x, t_tensor, labels)
+        
+        if t % 100 == 0:
+            print(f"Step {t}: pred_noise mean={pred_noise.mean().item():.4f}")
+        
+        alpha_t = diffusion.alphas[t].view(-1, 1)
+        beta_t = diffusion.betas[t].view(-1, 1)
+        sqrt_one_minus_alpha_bar = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1)
+        
+        x = (x - (1 - alpha_t) / sqrt_one_minus_alpha_bar * pred_noise) / torch.sqrt(alpha_t)
+        if t > 0:
+            x = x + torch.sqrt(beta_t) * torch.randn_like(x)
+        
+        x = torch.clamp(x, -3, 3)
+        
+        if t % 100 == 0:
+            os.makedirs("validation_results/sequences", exist_ok=True)
+            plt.figure(figsize=(10, 4))
+            plt.plot(x[0].cpu().numpy(), label="Generated")
+            plt.title(f"Intermediate Sequence (Step {t}, Year {conditions['date'][0, 0] * 7 + 2017:.0f})")
+            plt.legend()
+            plt.savefig(f"validation_results/sequences/step_{t}_year_{conditions['date'][0, 0] * 7 + 2017:.0f}.png")
+            plt.close()
+    
+    return x.cpu()
 
 def calculate_metrics(real_data, generated_data):
     from statsmodels.tsa.stattools import acf
@@ -299,11 +318,13 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     plt.figure(figsize=(15, 5))
     for i in range(min(3, len(real_samples))):
         plt.subplot(2, 3, i+1)
-        plt.plot(real_samples[i].numpy())
+        plt.plot(real_samples[i].numpy(), label="Real")
         plt.title(f"Real Sample {i+1} (Year {year})")
+        plt.legend()
         plt.subplot(2, 3, i+4)
-        plt.plot(gen_samples[i].numpy())
+        plt.plot(gen_samples[i].numpy(), label="Generated")
         plt.title(f"Generated Sample {i+1} (Year {year})")
+        plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'year_{year}_samples.png'))
     plt.close()
