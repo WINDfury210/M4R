@@ -88,33 +88,28 @@ class ConditionalUNet(nn.Module):
         self.channels = channels
         self.num_layers = len(channels)
 
-        # 编码器：卷积 + 残差块 + 自注意力 + 最大池化
+        # 编码器：卷积 + 残差块 + 自注意力（无池化）
         self.encoder_convs = nn.ModuleList()
         self.encoder_res = nn.ModuleList()
         self.attentions = nn.ModuleList()
-        self.pools = nn.ModuleList()
         in_channels = input_dim
         for i, out_channels in enumerate(channels):
             self.encoder_convs.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1))
             self.encoder_res.append(ResidualBlock(out_channels, out_channels))
-            # 为除了最后一层外的所有层添加自注意力
+            # 为除最后一层外的所有层添加自注意力
             self.attentions.append(SelfAttention(out_channels) if i < self.num_layers - 1 else nn.Identity())
-            # 为除了最后一层外的所有层添加最大池化
-            self.pools.append(nn.MaxPool2d(kernel_size=2, stride=2) if i < self.num_layers - 1 else nn.Identity())
             in_channels = out_channels
 
-        # 解码器：上采样 + 卷积 + 残差块
-        self.decoder_upsamples = nn.ModuleList()
+        # 解码器：卷积 + 残差块（无上采样）
         self.decoder_convs = nn.ModuleList()
         self.decoder_res = nn.ModuleList()
         for i in range(self.num_layers - 1):
             in_channels = channels[-1 - i] + channels[-2 - i]  # 拼接当前层和跳跃连接
             out_channels = channels[-2 - i]
-            self.decoder_upsamples.append(nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True))
             self.decoder_convs.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1))
             self.decoder_res.append(ResidualBlock(out_channels, out_channels))
-        
-        # 最后一层卷积：将跳跃连接与初始层拼接
+
+        # 最后一层卷积：与初始输入拼接
         self.final_conv = nn.Conv2d(channels[0] + input_dim, output_dim, kernel_size=3, padding=1)
 
         # 时间和标签嵌入的线性层
@@ -129,20 +124,18 @@ class ConditionalUNet(nn.Module):
 
         # 编码器路径
         skips = []
-        for conv, res, attn, pool in zip(self.encoder_convs, self.encoder_res, self.attentions, self.pools):
+        for conv, res, attn in zip(self.encoder_convs, self.encoder_res, self.attentions):
             x = F.relu(conv(x))
             x = res(x)
             x = attn(x)
             x = self.dropout(x)
             skips.append(x)
-            x = pool(x)  # 应用池化操作
 
         # 瓶颈层：添加时间和标签嵌入
         x = x + time_emb + label_emb
 
         # 解码器路径
-        for i, (upsample, conv, res) in enumerate(zip(self.decoder_upsamples, self.decoder_convs, self.decoder_res)):
-            x = upsample(x)  # 上采样
+        for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-2 - i]  # 获取对应的跳跃连接
             x = torch.cat([x, skip], dim=1)  # 拼接跳跃连接
             x = F.relu(conv(x))
