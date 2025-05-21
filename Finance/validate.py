@@ -329,12 +329,11 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
     metrics = {}
     all_gen_samples = []
     all_real_samples = []
-    real_all = torch.cat([batch["sequence"] for batch in dataloader], dim=0)
     
     for year_idx, year in enumerate(years):
         annual_date = annual_dates[year_idx].to(device)
         condition = {"date": annual_date.unsqueeze(0)}
-        real_sequences, real_indices = dataset.get_real_sequences_for_year(
+        real_sequences, _ = dataset.get_real_sequences_for_year(
             annual_date.cpu(), num_samples=num_groups_per_year
         )
         year_metrics_list = []
@@ -357,7 +356,6 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
             all_real_samples.append(real_data)
         metrics[f'year_{year}'] = year_metrics_list
         save_visualizations(year_real_samples, year_gen_samples, year_metrics_list, year, output_dir)
-        print(f"Generated samples for year {year}")
     
     gen_all = torch.cat(all_gen_samples, dim=0)
     real_all_subset = torch.cat(all_real_samples, dim=0)

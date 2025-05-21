@@ -127,7 +127,7 @@ class ConditionalUNet1D(nn.Module):
         # date: [batch_size, 3]，包含归一化的年、月、日
         time_emb = self.time_embed(t)
         date_emb = self.date_embed(date)
-        combined_cond = time_emb + 0.3 * date_emb  # 减弱日期嵌入影响
+        combined_cond = time_emb + date_emb  # 减弱日期嵌入影响
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
@@ -235,7 +235,7 @@ def mean_loss(pred, target):
 
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ConditionalUNet1D(seq_len=256).to(device)
+    model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
     diffusion = DiffusionProcess(num_timesteps=2000, device=device)
     dataset = FinancialDataset(config["data_path"])
     
@@ -269,7 +269,7 @@ def train_model(config):
             # mean_loss_val = mean_loss(pred_noise, noise)
             
             # 增加损失权重
-            loss = mse_loss + 10 * acf_loss_val + 10 * std_loss_val # + 0.5 * mean_loss_val
+            loss = mse_loss + 100 * std_loss_val # + 0.5 * mean_loss_val
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
             optimizer.step()
@@ -297,10 +297,11 @@ if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
-        "num_epochs": 500,
+        "num_epochs": 1000,
         "batch_size": 64,
+        "channels": [32, 64, 128, 256, 512],
         "lr": 1e-4,
-        "save_interval": 100
+        "save_interval": 500
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     train_model(config)
