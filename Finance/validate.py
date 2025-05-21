@@ -217,9 +217,6 @@ def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda",
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
         
-        if t % 50 == 0:
-            print(f"Step {t}: pred_noise mean={pred_noise.mean().item():.4f}")
-        
         alpha_t = diffusion.alphas[t].view(-1, 1)
         beta_t = diffusion.betas[t].view(-1, 1)
         sqrt_one_minus_alpha_bar = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1)
@@ -230,7 +227,7 @@ def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda",
         
         x = torch.clamp(x, -3, 3)
     
-    print(f"Year {year}: Gen mean={x.mean().item():.6f}, std={x.std().item():.6f}")
+    print(f"Year {int(year)}: Gen mean={x.mean().item():.6f}, std={x.std().item():.6f}")
     return x.cpu()
 
 def calculate_metrics(real_data, generated_data):
