@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from statsmodels.tsa.stattools import acf
-import math
 import os
 
 # 1. Model Definitions --------------------------------------------------------
@@ -270,7 +269,7 @@ def train_model(config):
             # mean_loss_val = mean_loss(pred_noise, noise)
             
             # 增加损失权重
-            loss = mse_loss + acf_loss_val + std_loss_val # + 0.5 * mean_loss_val
+            loss = mse_loss + 10 * acf_loss_val + 10 * std_loss_val # + 0.5 * mean_loss_val
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
             optimizer.step()
@@ -298,10 +297,10 @@ if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
-        "num_epochs": 1000,
-        "batch_size": 62,
+        "num_epochs": 500,
+        "batch_size": 64,
         "lr": 1e-4,
-        "save_interval": 1-00
+        "save_interval": 100
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     train_model(config)
