@@ -232,7 +232,7 @@ def mean_loss(pred, target):
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    diffusion = DiffusionProcess(num_timesteps=2000, device=device)
+    diffusion = DiffusionProcess(num_timesteps=200, device=device)
     dataset = FinancialDataset(config["data_path"])
     
     # 均匀采样，无特定日期增强
