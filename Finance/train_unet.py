@@ -141,7 +141,8 @@ class ConditionalUNet1D(nn.Module):
         x = x + cond
         x = self.mid_conv2(x)
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
-            skip = skips[-(i+2)]
+            skip = skips[-(i+1)]
+            print(x.shape)
             x = torch.cat([x, skip], dim=1)
             x = F.relu(conv(x))
             x = res(x)
