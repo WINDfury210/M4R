@@ -144,6 +144,7 @@ class ConditionalUNet1D(nn.Module):
             skip = skips[-(i+1)]
             print(x.shape)
             x = torch.cat([x, skip], dim=1)
+            print(x.shape)
             x = F.relu(conv(x))
             x = res(x)
         x = self.final_upsample(x)
