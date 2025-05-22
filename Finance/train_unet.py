@@ -99,7 +99,7 @@ class ConditionalUNet1D(nn.Module):
             self.encoder_convs.append(nn.Conv1d(in_channels, out_channels, kernel_size=3, 
                                               stride=2 if i>0 else 1, padding=1))
             self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
-            self.attentions.append(SelfAttention1D(out_channels) if 0<i<len(channels) else nn.Identity())
+            self.attentions.append(SelfAttention1D(out_channels) if i in [1, 2, 3] else nn.Identity())
             in_channels = out_channels
         self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
         self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
