@@ -261,11 +261,11 @@ def train_model(config):
             
             mse_loss = F.mse_loss(pred_noise, noise)
             # acf_loss_val = acf_loss(pred_noise, noise)
-            std_loss_val = std_loss(pred_noise, noise)
+            # std_loss_val = std_loss(pred_noise, noise)
             # mean_loss_val = mean_loss(pred_noise, noise)
             
             # 增加损失权重
-            loss = mse_loss + std_loss_val # + 0.5 * mean_loss_val
+            loss = mse_loss #+ std_loss_val # + 0.5 * mean_loss_val
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
             optimizer.step()
