@@ -70,9 +70,15 @@ class ResidualBlock1D(nn.Module):
 
     def forward(self, x):
         residual = self.shortcut(x)
-        out = self.ln1(self.conv1(x))
+        out = self.conv1(x)
+        out = out.permute(0, 2, 1)  # [batch_size, seq_len, out_channels]
+        out = self.ln1(out)
+        out = out.permute(0, 2, 1)  # [batch_size, out_channels, seq_len]
         out = self.relu(out)
-        out = self.ln2(self.conv2(out))
+        out = self.conv2(out)
+        out = out.permute(0, 2, 1)
+        out = self.ln2(out)
+        out = out.permute(0, 2, 1)
         out += residual
         return self.relu(out)
 
@@ -117,7 +123,7 @@ class ConditionalUNet1D(nn.Module):
     def forward(self, x, t, date):
         time_emb = self.time_embed(t)
         date_emb = self.date_embed(date)
-        combined_cond = time_emb  # 禁用日期嵌入
+        combined_cond = time_emb + date_emb # Disable date embedding
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
@@ -132,6 +138,7 @@ class ConditionalUNet1D(nn.Module):
         x = self.mid_conv2(x)
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
+            print(f"Decoder layer {i}, x shape: {x.shape}, skip shape: {skip.shape}")
             if x.shape[-1] != skip.shape[-1]:
                 if x.shape[-1] < skip.shape[-1]:
                     pad_len = skip.shape[-1] - x.shape[-1]
@@ -227,7 +234,7 @@ def mean_loss(pred, target):
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    diffusion = DiffusionProcess(num_timesteps=1000, device=device)
+    diffusion = DiffusionProcess(num_timesteps=200, device=device)
     dataset = FinancialDataset(config["data_path"])
     
     dataloader = DataLoader(
@@ -286,9 +293,9 @@ if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
-        "num_epochs": 6000,
+        "num_epochs": 1000,
         "batch_size": 64,
-        "channels": [32, 64, 128, 256],
+        "channels": [32, 64, 128, 256, 512],
         "lr": 1e-5,
         "save_interval": 500
     }
