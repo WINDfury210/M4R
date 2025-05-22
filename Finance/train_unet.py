@@ -138,7 +138,6 @@ class ConditionalUNet1D(nn.Module):
         x = self.mid_conv2(x)
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
-            print(f"Decoder layer {i}, x shape: {x.shape}, skip shape: {skip.shape}")
             if x.shape[-1] != skip.shape[-1]:
                 if x.shape[-1] < skip.shape[-1]:
                     pad_len = skip.shape[-1] - x.shape[-1]
