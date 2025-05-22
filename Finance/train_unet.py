@@ -99,7 +99,7 @@ class ConditionalUNet1D(nn.Module):
             self.encoder_convs.append(nn.Conv1d(in_channels, out_channels, kernel_size=3, 
                                               stride=2 if i>0 else 1, padding=1))
             self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
-            self.attentions.append(SelfAttention1D(out_channels) if i in [1, 2, 3] else nn.Identity())
+            self.attentions.append(SelfAttention1D(out_channels) if 0<i<len(channels) else nn.Identity())
             in_channels = out_channels
         self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
         self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
@@ -141,12 +141,11 @@ class ConditionalUNet1D(nn.Module):
         x = x + cond
         x = self.mid_conv2(x)
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
-            skip = skips[-(i+1)]
+            skip = skips[-(i+2)]
             x = torch.cat([x, skip], dim=1)
             x = F.relu(conv(x))
             x = res(x)
         x = self.final_upsample(x)
-        
         return self.final_conv(x).squeeze(1)
 
 # 2. Diffusion Process -------------------------------------------------------
@@ -233,7 +232,7 @@ def mean_loss(pred, target):
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    diffusion = DiffusionProcess(num_timesteps=200, device=device)
+    diffusion = DiffusionProcess(num_timesteps=2000, device=device)
     dataset = FinancialDataset(config["data_path"])
     
     # 均匀采样，无特定日期增强
@@ -261,12 +260,12 @@ def train_model(config):
             pred_noise = model(noisy_x, t, dates)
             
             mse_loss = F.mse_loss(pred_noise, noise)
-            # acf_loss_val = acf_loss(pred_noise, noise)
-            # std_loss_val = std_loss(pred_noise, noise)
+            acf_loss_val = acf_loss(pred_noise, noise)
+            std_loss_val = std_loss(pred_noise, noise)
             # mean_loss_val = mean_loss(pred_noise, noise)
             
             # 增加损失权重
-            loss = mse_loss #+ std_loss_val # + 0.5 * mean_loss_val
+            loss = mse_loss + 100 * std_loss_val # + 0.5 * mean_loss_val
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
             optimizer.step()
@@ -275,7 +274,9 @@ def train_model(config):
         
         scheduler.step()
         avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f} ")
+        print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}, "
+              f"MSE: {mse_loss.item():.6f}, ACF: {acf_loss_val.item():.6f}, "
+              f"Std: {std_loss_val.item():.6f}")
         
         if (epoch + 1) % config["save_interval"] == 0:
             torch.save({
@@ -294,7 +295,7 @@ if __name__ == "__main__":
         "save_dir": "saved_models",
         "num_epochs": 1000,
         "batch_size": 64,
-        "channels": [32, 64, 128, 256],
+        "channels": [32, 64, 128, 256, 512],
         "lr": 1e-4,
         "save_interval": 500
     }
