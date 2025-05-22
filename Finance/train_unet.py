@@ -146,6 +146,7 @@ class ConditionalUNet1D(nn.Module):
             x = F.relu(conv(x))
             x = res(x)
         x = self.final_upsample(x)
+        
         return self.final_conv(x).squeeze(1)
 
 # 2. Diffusion Process -------------------------------------------------------
@@ -293,7 +294,7 @@ if __name__ == "__main__":
         "save_dir": "saved_models",
         "num_epochs": 1000,
         "batch_size": 64,
-        "channels": [32, 64, 128, 256, 512],
+        "channels": [32, 64, 128, 256],
         "lr": 1e-4,
         "save_interval": 500
     }
