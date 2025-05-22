@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
-from statsmodels.tsa.stattools import acf
 import os
 
 # 1. Model Definitions --------------------------------------------------------
@@ -63,16 +62,17 @@ class ResidualBlock1D(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.ln1 = nn.LayerNorm(out_channels)
         self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.ln2 = nn.LayerNorm(out_channels)
         self.relu = nn.ReLU()
         self.shortcut = nn.Conv1d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x):
         residual = self.shortcut(x)
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.ln1(self.conv1(x))
+        out = self.relu(out)
+        out = self.ln2(self.conv2(out))
         out += residual
         return self.relu(out)
 
@@ -85,7 +85,7 @@ class ConditionalUNet1D(nn.Module):
         
         self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
         self.date_embed = nn.Sequential(
-            nn.Linear(3, 32),  # 输入归一化的年、月、日
+            nn.Linear(3, 32),
             nn.ReLU(),
             nn.Linear(32, channels[-1]),
             nn.LayerNorm(channels[-1])
@@ -109,25 +109,15 @@ class ConditionalUNet1D(nn.Module):
             in_channels = channels[-1-i] + channels[-1-i]
             out_channels = channels[-2-i]
             self.decoder_convs.append(nn.ConvTranspose1d(
-                in_channels, out_channels,
-                kernel_size=3, stride=2,
-                padding=1, output_padding=1
+                in_channels, out_channels, kernel_size=3, stride=2, padding=1, output_padding=1
             ))
             self.decoder_res.append(ResidualBlock1D(out_channels, out_channels))
-        self.final_upsample = nn.Sequential(
-            nn.ConvTranspose1d(channels[0], channels[0],
-                              kernel_size=3, stride=2,
-                              padding=1, output_padding=1),
-            nn.BatchNorm1d(channels[0]),
-            nn.ReLU()
-        )
         self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
 
     def forward(self, x, t, date):
-        # date: [batch_size, 3]，包含归一化的年、月、日
         time_emb = self.time_embed(t)
         date_emb = self.date_embed(date)
-        combined_cond = time_emb + date_emb  # 减弱日期嵌入影响
+        combined_cond = time_emb  # 禁用日期嵌入
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
@@ -142,13 +132,17 @@ class ConditionalUNet1D(nn.Module):
         x = self.mid_conv2(x)
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
-            print(x.shape)
+            if x.shape[-1] != skip.shape[-1]:
+                if x.shape[-1] < skip.shape[-1]:
+                    pad_len = skip.shape[-1] - x.shape[-1]
+                    x = F.pad(x, (0, pad_len))
+                else:
+                    x = x[:, :, :skip.shape[-1]]
             x = torch.cat([x, skip], dim=1)
-            print(x.shape)
             x = F.relu(conv(x))
             x = res(x)
-        x = self.final_upsample(x)
-        return self.final_conv(x).squeeze(1)
+        x = self.final_conv(x).squeeze(1)
+        return x
 
 # 2. Diffusion Process -------------------------------------------------------
 
@@ -205,28 +199,27 @@ class FinancialDataset(Dataset):
 # 4. Loss Functions -----------------------------------------------------------
 
 def acf_loss(pred, target):
-    """Compute MSE loss between ACF of predictions and target."""
-    pred_np = pred.detach().cpu().numpy()  # [batch_size, seq_len]
-    target_np = target.detach().cpu().numpy()
-    
-    pred_acf = np.array([acf(pred_np[i], nlags=20, fft=True)[1:] for i in range(pred_np.shape[0])]).mean(axis=0)
-    target_acf = np.array([acf(target_np[i], nlags=20, fft=True)[1:] for i in range(target_np.shape[0])]).mean(axis=0)
-    
-    pred_acf = torch.tensor(pred_acf, device=pred.device, dtype=torch.float32)
-    target_acf = torch.tensor(target_acf, device=pred.device, dtype=torch.float32)
-    
+    """Compute MSE loss between ACF of predictions and target using FFT."""
+    pred = pred - pred.mean(dim=-1, keepdim=True)
+    target = target - target.mean(dim=-1, keepdim=True)
+    pred_fft = torch.fft.rfft(pred, dim=-1)
+    target_fft = torch.fft.rfft(target, dim=-1)
+    pred_acf = torch.fft.irfft(pred_fft * pred_fft.conj(), dim=-1)
+    target_acf = torch.fft.irfft(target_fft * target_fft.conj(), dim=-1)
+    pred_acf = pred_acf[:, 1:21] / pred_acf[:, 0:1]
+    target_acf = target_acf[:, 1:21] / target_acf[:, 0:1]
     return F.mse_loss(pred_acf, target_acf)
 
 def std_loss(pred, target):
     """Compute MSE loss between standard deviations of predictions and target."""
-    pred_std = pred.std(dim=-1)  # [batch_size]
-    target_std = target.std(dim=-1)  # [batch_size]
+    pred_std = pred.std(dim=-1)
+    target_std = target.std(dim=-1)
     return F.mse_loss(pred_std, target_std)
 
 def mean_loss(pred, target):
     """Compute MSE loss between means of predictions and target."""
-    pred_mean = pred.mean(dim=-1)  # [batch_size]
-    target_mean = target.mean(dim=-1)  # [batch_size]
+    pred_mean = pred.mean(dim=-1)
+    target_mean = target.mean(dim=-1)
     return F.mse_loss(pred_mean, target_mean)
 
 # 5. Training Function --------------------------------------------------------
@@ -234,10 +227,9 @@ def mean_loss(pred, target):
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    diffusion = DiffusionProcess(num_timesteps=2000, device=device)
+    diffusion = DiffusionProcess(num_timesteps=1000, device=device)
     dataset = FinancialDataset(config["data_path"])
     
-    # 均匀采样，无特定日期增强
     dataloader = DataLoader(
         dataset,
         batch_size=config["batch_size"],
@@ -264,12 +256,11 @@ def train_model(config):
             mse_loss = F.mse_loss(pred_noise, noise)
             acf_loss_val = acf_loss(pred_noise, noise)
             std_loss_val = std_loss(pred_noise, noise)
-            # mean_loss_val = mean_loss(pred_noise, noise)
+            mean_loss_val = mean_loss(pred_noise, noise)
             
-            # 增加损失权重
-            loss = mse_loss + 100 * std_loss_val # + 0.5 * mean_loss_val
+            loss = mse_loss + 6.0 * acf_loss_val + 5.0 * std_loss_val + 3.0 * mean_loss_val
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             total_loss += loss.item()
@@ -278,7 +269,7 @@ def train_model(config):
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}, "
               f"MSE: {mse_loss.item():.6f}, ACF: {acf_loss_val.item():.6f}, "
-              f"Std: {std_loss_val.item():.6f}")
+              f"Std: {std_loss_val.item():.6f}, Mean: {mean_loss_val.item():.6f}")
         
         if (epoch + 1) % config["save_interval"] == 0:
             torch.save({
@@ -295,10 +286,10 @@ if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
-        "num_epochs": 1000,
+        "num_epochs": 6000,
         "batch_size": 64,
-        "channels": [32, 64, 128, 256, 512],
-        "lr": 1e-4,
+        "channels": [32, 64, 128, 256],
+        "lr": 1e-5,
         "save_interval": 500
     }
     os.makedirs(config["save_dir"], exist_ok=True)
