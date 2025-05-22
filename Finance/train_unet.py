@@ -85,9 +85,9 @@ class ConditionalUNet1D(nn.Module):
         
         self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
         self.date_embed = nn.Sequential(
-            nn.Linear(3, 512),  # 输入归一化的年、月、日
+            nn.Linear(3, 32),  # 输入归一化的年、月、日
             nn.ReLU(),
-            nn.Linear(512, channels[-1]),
+            nn.Linear(32, channels[-1]),
             nn.LayerNorm(channels[-1])
         )
         self.input_conv = nn.Conv1d(1, channels[0], kernel_size=3, padding=1)
@@ -99,7 +99,7 @@ class ConditionalUNet1D(nn.Module):
             self.encoder_convs.append(nn.Conv1d(in_channels, out_channels, kernel_size=3, 
                                               stride=2 if i>0 else 1, padding=1))
             self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
-            self.attentions.append(SelfAttention1D(out_channels) if i in [1, 2, 3] else nn.Identity())
+            self.attentions.append(SelfAttention1D(out_channels) if 0<i<len(channels) else nn.Identity())
             in_channels = out_channels
         self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
         self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
@@ -142,14 +142,10 @@ class ConditionalUNet1D(nn.Module):
         x = self.mid_conv2(x)
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
-            if x.shape[-1] != skip.shape[-1]:
-                x = F.interpolate(x, size=skip.shape[-1], mode='linear', align_corners=False)
             x = torch.cat([x, skip], dim=1)
             x = F.relu(conv(x))
             x = res(x)
         x = self.final_upsample(x)
-        if x.shape[-1] != self.seq_len:
-            x = F.interpolate(x, size=self.seq_len, mode='linear', align_corners=False)
         return self.final_conv(x).squeeze(1)
 
 # 2. Diffusion Process -------------------------------------------------------

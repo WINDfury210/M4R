@@ -126,7 +126,7 @@ class ConditionalUNet1D(nn.Module):
     def forward(self, x, t, date):
         time_emb = self.time_embed(t)
         date_emb = self.date_embed(date)
-        combined_cond = time_emb + 0.3 * date_emb
+        combined_cond = time_emb + date_emb
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
@@ -206,13 +206,13 @@ class FinancialDataset(Dataset):
 # 4. Validation Core ---------------------------------------------------------
 
 @torch.no_grad()
-def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda", steps=200):
+def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda"):
     """Generate samples with DDPM sampling"""
     model.eval()
     labels = conditions["date"].repeat(num_samples, 1).to(device)
     year = conditions["date"][0, 0].item() * (2024 - 2017) + 2017
-    noise_scale = 0.4 if year in [2019, 2020, 2021] else 0.2
-    x = torch.randn(num_samples, 256, device=device) * noise_scale
+    # noise_scale = 0.4 if year in [2019, 2020, 2021] else 0.2
+    x = torch.randn(num_samples, 256, device=device)# * noise_scale
     for t in reversed(range(diffusion.num_timesteps)):
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
@@ -314,7 +314,7 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
 def run_validation(model_path, data_path, output_dir="validation_results"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     diffusion = DiffusionProcess(device=device)
-    model = ConditionalUNet1D(seq_len=256).to(device)
+    model = ConditionalUNet1D(seq_len=256, channels=[32, 64, 128, 256, 512]).to(device)
     checkpoint = torch.load(model_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'], strict=True)
