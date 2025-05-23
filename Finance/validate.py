@@ -63,16 +63,23 @@ class ResidualBlock1D(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.ln1 = nn.LayerNorm(out_channels)
         self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.ln2 = nn.LayerNorm(out_channels)
         self.relu = nn.ReLU()
         self.shortcut = nn.Conv1d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x):
         residual = self.shortcut(x)
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.conv1(x)
+        out = out.permute(0, 2, 1)  # [batch_size, seq_len, out_channels]
+        out = self.ln1(out)
+        out = out.permute(0, 2, 1)  # [batch_size, out_channels, seq_len]
+        out = self.relu(out)
+        out = self.conv2(out)
+        out = out.permute(0, 2, 1)
+        out = self.ln2(out)
+        out = out.permute(0, 2, 1)
         out += residual
         return self.relu(out)
 
@@ -85,9 +92,9 @@ class ConditionalUNet1D(nn.Module):
         
         self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
         self.date_embed = nn.Sequential(
-            nn.Linear(3, 512),
+            nn.Linear(3, 32),
             nn.ReLU(),
-            nn.Linear(512, channels[-1]),
+            nn.Linear(32, channels[-1]),
             nn.LayerNorm(channels[-1])
         )
         self.input_conv = nn.Conv1d(1, channels[0], kernel_size=3, padding=1)
@@ -99,7 +106,7 @@ class ConditionalUNet1D(nn.Module):
             self.encoder_convs.append(nn.Conv1d(in_channels, out_channels, kernel_size=3, 
                                               stride=2 if i>0 else 1, padding=1))
             self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
-            self.attentions.append(SelfAttention1D(out_channels) if i in [1, 2, 3] else nn.Identity())
+            self.attentions.append(SelfAttention1D(out_channels) if 0<i<len(channels) else nn.Identity())
             in_channels = out_channels
         self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
         self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
@@ -109,24 +116,15 @@ class ConditionalUNet1D(nn.Module):
             in_channels = channels[-1-i] + channels[-1-i]
             out_channels = channels[-2-i]
             self.decoder_convs.append(nn.ConvTranspose1d(
-                in_channels, out_channels,
-                kernel_size=3, stride=2,
-                padding=1, output_padding=1
+                in_channels, out_channels, kernel_size=3, stride=2, padding=1, output_padding=1
             ))
             self.decoder_res.append(ResidualBlock1D(out_channels, out_channels))
-        self.final_upsample = nn.Sequential(
-            nn.ConvTranspose1d(channels[0], channels[0],
-                              kernel_size=3, stride=2,
-                              padding=1, output_padding=1),
-            nn.BatchNorm1d(channels[0]),
-            nn.ReLU()
-        )
         self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
 
     def forward(self, x, t, date):
         time_emb = self.time_embed(t)
         date_emb = self.date_embed(date)
-        combined_cond = time_emb + date_emb
+        combined_cond = time_emb + date_emb # Disable date embedding
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
@@ -142,14 +140,16 @@ class ConditionalUNet1D(nn.Module):
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
             if x.shape[-1] != skip.shape[-1]:
-                x = F.interpolate(x, size=skip.shape[-1], mode='linear', align_corners=False)
+                if x.shape[-1] < skip.shape[-1]:
+                    pad_len = skip.shape[-1] - x.shape[-1]
+                    x = F.pad(x, (0, pad_len))
+                else:
+                    x = x[:, :, :skip.shape[-1]]
             x = torch.cat([x, skip], dim=1)
             x = F.relu(conv(x))
             x = res(x)
-        x = self.final_upsample(x)
-        if x.shape[-1] != self.seq_len:
-            x = F.interpolate(x, size=self.seq_len, mode='linear', align_corners=False)
-        return self.final_conv(x).squeeze(1)
+        x = self.final_conv(x).squeeze(1)
+        return x
 
 # 2. Diffusion Process -------------------------------------------------------
 
