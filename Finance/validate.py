@@ -153,10 +153,11 @@ class ConditionalUNet1D(nn.Module):
             x = res(x)
         x = self.final_conv(x).squeeze(1)
         return x
+    
 # 2. Diffusion Process -------------------------------------------------------
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=1500, device="cpu"):
+    def __init__(self, num_timesteps=1000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         self.betas = self._linear_beta_schedule().to(device)
@@ -351,7 +352,7 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
 def run_validation(model_path, data_path, output_dir="validation_results"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     diffusion = DiffusionProcess(device=device, num_timesteps=1500)
-    model = ConditionalUNet1D(seq_len=256, channels=[32, 64, 128, 256]).to(device)
+    model = ConditionalUNet1D(seq_len=256, channels=[32, 64, 128, 256, 512]).to(device)
     checkpoint = torch.load(model_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'], strict=True)
