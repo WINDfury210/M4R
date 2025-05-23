@@ -365,6 +365,6 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
 
 if __name__ == "__main__":
     run_validation(
-        model_path="saved_models/final_model.pth",
+        model_path="saved_models/model_epoch_500.pth",
         data_path="financial_data/sequences/sequences_256.pt"
     )
