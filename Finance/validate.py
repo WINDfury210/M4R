@@ -11,6 +11,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
+from scipy import stats
+from statsmodels.tsa.stattools import acf
+
 # 1. Model Definitions --------------------------------------------------------
 
 class TimeEmbedding(nn.Module):
@@ -42,8 +45,9 @@ class TimeEmbedding(nn.Module):
             return self.mlp(time)
 
 class SelfAttention1D(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, num_heads=4):
         super().__init__()
+        self.num_heads = num_heads
         self.query = nn.Conv1d(channels, channels // 8, kernel_size=1)
         self.key = nn.Conv1d(channels, channels // 8, kernel_size=1)
         self.value = nn.Conv1d(channels, channels, kernel_size=1)
@@ -52,11 +56,12 @@ class SelfAttention1D(nn.Module):
 
     def forward(self, x):
         batch, ch, seq_len = x.size()
-        q = self.query(x).view(batch, -1, seq_len).permute(0, 2, 1)
-        k = self.key(x).view(batch, -1, seq_len)
-        v = self.value(x).view(batch, -1, seq_len)
-        attn = self.softmax(torch.bmm(q, k) / (ch // 8) ** 0.5)
-        out = torch.bmm(v, attn.permute(0, 2, 1)).view(batch, ch, seq_len)
+        head_dim = ch // 8 // self.num_heads
+        q = self.query(x).view(batch, self.num_heads, head_dim, seq_len).permute(0, 1, 3, 2)
+        k = self.key(x).view(batch, self.num_heads, head_dim, seq_len)
+        v = self.value(x).view(batch, self.num_heads, ch // self.num_heads, seq_len)
+        attn = self.softmax(torch.matmul(q, k.transpose(-1, -2)) / (head_dim ** 0.5))
+        out = torch.matmul(attn, v).permute(0, 1, 3, 2).contiguous().view(batch, ch, seq_len)
         return x + self.gamma * out
 
 class ResidualBlock1D(nn.Module):
@@ -72,9 +77,9 @@ class ResidualBlock1D(nn.Module):
     def forward(self, x):
         residual = self.shortcut(x)
         out = self.conv1(x)
-        out = out.permute(0, 2, 1)  # [batch_size, seq_len, out_channels]
+        out = out.permute(0, 2, 1)
         out = self.ln1(out)
-        out = out.permute(0, 2, 1)  # [batch_size, out_channels, seq_len]
+        out = out.permute(0, 2, 1)
         out = self.relu(out)
         out = self.conv2(out)
         out = out.permute(0, 2, 1)
@@ -106,7 +111,7 @@ class ConditionalUNet1D(nn.Module):
             self.encoder_convs.append(nn.Conv1d(in_channels, out_channels, kernel_size=3, 
                                               stride=2 if i>0 else 1, padding=1))
             self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
-            self.attentions.append(SelfAttention1D(out_channels) if 0<i<len(channels) else nn.Identity())
+            self.attentions.append(SelfAttention1D(out_channels, num_heads=4) if 0<i<len(channels) else nn.Identity())
             in_channels = out_channels
         self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
         self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
@@ -124,7 +129,7 @@ class ConditionalUNet1D(nn.Module):
     def forward(self, x, t, date):
         time_emb = self.time_embed(t)
         date_emb = self.date_embed(date)
-        combined_cond = time_emb + date_emb # Disable date embedding
+        combined_cond = time_emb  # Disable date embedding
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
@@ -154,7 +159,7 @@ class ConditionalUNet1D(nn.Module):
 # 2. Diffusion Process -------------------------------------------------------
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=1000, device="cpu"):
+    def __init__(self, num_timesteps=1500, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         self.betas = self._linear_beta_schedule().to(device)
@@ -206,14 +211,14 @@ class FinancialDataset(Dataset):
 # 4. Validation Core ---------------------------------------------------------
 
 @torch.no_grad()
-def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda"):
+def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda", steps=1500):
     """Generate samples with DDPM sampling"""
     model.eval()
     labels = conditions["date"].repeat(num_samples, 1).to(device)
     year = conditions["date"][0, 0].item() * (2024 - 2017) + 2017
-    # noise_scale = 0.4 if year in [2019, 2020, 2021] else 0.2
-    x = torch.randn(num_samples, 256, device=device)# * noise_scale
-    for t in reversed(range(diffusion.num_timesteps)):
+    noise_scale = 0.05 if year in [2019, 2020, 2021] else 0.01
+    x = torch.randn(num_samples, 256, device=device) * noise_scale
+    for t in reversed(range(steps)):
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
         
@@ -231,7 +236,6 @@ def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda")
     return x.cpu()
 
 def calculate_metrics(real_data, generated_data):
-    from statsmodels.tsa.stattools import acf
     metrics = {}
     
     if real_data.dim() == 1:
@@ -239,24 +243,47 @@ def calculate_metrics(real_data, generated_data):
     if generated_data.dim() == 1:
         generated_data = generated_data.unsqueeze(0)
     
+    # Basic statistics
     metrics['real_mean'] = real_data.mean().item()
     metrics['gen_mean'] = generated_data.mean().item()
     metrics['real_std'] = real_data.std().item()
     metrics['gen_std'] = generated_data.std().item()
     
-    real_data_np = real_data.numpy()
-    gen_data_np = generated_data.numpy()
-    real_lagged = real_data_np[:, :-1]
-    real_next = real_data_np[:, 1:]
-    gen_lagged = gen_data_np[:, :-1]
-    gen_next = gen_data_np[:, 1:]
-    metrics['real_corr'] = np.corrcoef(real_lagged.flatten(), real_next.flatten())[0, 1]
-    metrics['gen_corr'] = np.corrcoef(gen_lagged.flatten(), gen_next.flatten())[0, 1]
+    real_data_np = real_data.numpy().flatten()
+    gen_data_np = generated_data.numpy().flatten()
     
-    real_acf = acf(real_data_np.flatten(), nlags=20, fft=True)[1:].mean()
-    gen_acf = acf(gen_data_np.flatten(), nlags=20, fft=True)[1:].mean()
+    # Correlation
+    real_lagged = real_data_np[:-1]
+    real_next = real_data_np[1:]
+    gen_lagged = gen_data_np[:-1]
+    gen_next = gen_data_np[1:]
+    metrics['real_corr'] = np.corrcoef(real_lagged, real_next)[0, 1] if len(real_lagged) > 1 else 0.0
+    metrics['gen_corr'] = np.corrcoef(gen_lagged, gen_next)[0, 1] if len(gen_lagged) > 1 else 0.0
+    
+    # Autocorrelation
+    real_acf = acf(real_data_np, nlags=20, fft=True)[1:].mean()
+    gen_acf = acf(gen_data_np, nlags=20, fft=True)[1:].mean()
     metrics['real_acf'] = real_acf
     metrics['gen_acf'] = gen_acf
+    
+    # KS Statistic
+    ks_stat, ks_pval = stats.ks_2samp(real_data_np, gen_data_np)
+    metrics['ks_stat'] = ks_stat
+    metrics['ks_pval'] = ks_pval
+    
+    # Wasserstein Distance
+    wass_dist = stats.wasserstein_distance(real_data_np, gen_data_np)
+    metrics['wass_dist'] = wass_dist
+    
+    # Shapiro-Wilk Test
+    _, shapiro_pval = stats.shapiro(gen_data_np)
+    metrics['shapiro_pval'] = shapiro_pval
+    
+    # Skewness and Kurtosis
+    metrics['real_skew'] = stats.skew(real_data_np)
+    metrics['gen_skew'] = stats.skew(gen_data_np)
+    metrics['real_kurt'] = stats.kurtosis(real_data_np)
+    metrics['gen_kurt'] = stats.kurtosis(gen_data_np)
     
     return metrics
 
@@ -265,46 +292,59 @@ def print_enhanced_report(metrics_dict, years):
     
     # Global Statistics
     print("\n[Global Statistics]")
-    print(f"{'Metric':<10} {'Diff':>10} {'Z-score':>10}")
-    print("-" * 32)
+    print(f"{'Metric':<12} {'Diff':>10} {'Z-score':>10}")
+    print("-" * 34)
     global_stats = metrics_dict['global']
     z_score_mean = (global_stats['gen_mean'] - global_stats['real_mean']) / global_stats['real_std']
     z_score_std = (global_stats['gen_std'] - global_stats['real_std']) / global_stats['real_std']
-    print(f"{'Mean':<10} {abs(global_stats['gen_mean']-global_stats['real_mean']):>10.6f} {z_score_mean:>10.2f}")
-    print(f"{'Std Dev':<10} {abs(global_stats['gen_std']-global_stats['real_std']):>10.6f} {z_score_std:>10.2f}")
-    print(f"{'Corr':<10} {abs(global_stats['gen_corr']-global_stats['real_corr']):>10.6f} {'-':>10}")
-    print(f"{'Autocorr':<10} {abs(global_stats['gen_acf']-global_stats['real_acf']):>10.6f} {'-':>10}")
+    print(f"{'Mean':<12} {abs(global_stats['gen_mean']-global_stats['real_mean']):>10.6f} {z_score_mean:>10.2f}")
+    print(f"{'Std Dev':<12} {abs(global_stats['gen_std']-global_stats['real_std']):>10.6f} {z_score_std:>10.2f}")
+    print(f"{'Corr':<12} {abs(global_stats['gen_corr']-global_stats['real_corr']):>10.6f} {'-':>10}")
+    print(f"{'Autocorr':<12} {abs(global_stats['gen_acf']-global_stats['real_acf']):>10.6f} {'-':>10}")
+    print(f"{'KS Stat':<12} {global_stats['ks_stat']:>10.6f} {'-':>10}")
+    print(f"{'Wass Dist':<12} {global_stats['wass_dist']:>10.6f} {'-':>10}")
+    print(f"{'Shapiro P':<12} {global_stats['shapiro_pval']:>10.6f} {'-':>10}")
+    print(f"{'Skew Diff':<12} {abs(global_stats['gen_skew']-global_stats['real_skew']):>10.6f} {'-':>10}")
+    print(f"{'Kurt Diff':<12} {abs(global_stats['gen_kurt']-global_stats['real_kurt']):>10.6f} {'-':>10}")
     
     # Per-Sample Statistics (First 3 samples per year)
     print("\n[Per-Sample Statistics]")
-    print(f"{'Year':<6} {'Sample':<8} {'Mean Diff':>10} {'Std Diff':>10} {'Corr Diff':>10} {'Acf Diff':>10}")
-    print("-" * 54)
+    print(f"{'Year':<6} {'Sample':<8} {'Mean Diff':>10} {'Std Diff':>10} {'Corr Diff':>10} {'Acf Diff':>10} {'KS Stat':>10} {'Wass Dist':>10}")
+    print("-" * 74)
     for year in years:
         for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
             diff_values = []
-            for metric in ['mean', 'std', 'corr', 'acf']:
-                real_key = f'real_{metric}'
-                gen_key = f'gen_{metric}'
-                diff = abs(sample_metrics[gen_key] - sample_metrics[real_key])
-                # 高亮阈值：Std 和 Corr > 0.1，Mean 和 Acf > 0.01
-                threshold = 0.01 if metric in ['mean', 'acf'] else 0.1
+            for metric in ['mean', 'std', 'corr', 'acf', 'ks_stat', 'wass_dist']:
+                if metric in ['ks_stat', 'wass_dist']:
+                    diff = sample_metrics[metric]
+                else:
+                    real_key = f'real_{metric}'
+                    gen_key = f'gen_{metric}'
+                    diff = abs(sample_metrics[gen_key] - sample_metrics[real_key])
+                # 高亮阈值：Mean 和 Acf > 0.0002，Std 和 Corr > 0.005，KS > 0.05，Wass > 0.01
+                threshold = 0.0002 if metric == 'mean' else 0.005 if metric in ['std', 'corr', 'acf'] else 0.05 if metric == 'ks_stat' else 0.01
                 diff_values.append(f"{diff:>8.6f}{'*' if diff > threshold else ''}")
-            print(f"{year:<6} {i+1:<8} {diff_values[0]:>10} {diff_values[1]:>10} {diff_values[2]:>10} {diff_values[3]:>10}")
+            print(f"{year:<6} {i+1:<8} {diff_values[0]:>10} {diff_values[1]:>10} {diff_values[2]:>10} {diff_values[3]:>10} {diff_values[4]:>10} {diff_values[5]:>10}")
 
 def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, f'metrics_{year}.json'), 'w') as f:
         json.dump(metrics, f, indent=2)
-    plt.figure(figsize=(15, 5))
+    plt.figure(figsize=(15, 10))
     for i in range(min(3, len(real_samples))):
-        plt.subplot(2, 3, i+1)
+        # Time series plots
+        plt.subplot(3, 3, i+1)
         plt.plot(real_samples[i].numpy(), label="Real")
         plt.title(f"Real Sample {i+1} (Year {year})")
         plt.legend()
-        plt.subplot(2, 3, i+4)
+        plt.subplot(3, 3, i+4)
         plt.plot(gen_samples[i].numpy(), label="Generated")
         plt.title(f"Generated Sample {i+1} (Year {year})")
         plt.legend()
+        # Q-Q Plot
+        plt.subplot(3, 3, i+7)
+        stats.probplot(gen_samples[i].numpy(), dist="norm", plot=plt)
+        plt.title(f"Q-Q Plot Gen Sample {i+1}")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'year_{year}_samples.png'))
     plt.close()
@@ -313,8 +353,8 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
 
 def run_validation(model_path, data_path, output_dir="validation_results"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    diffusion = DiffusionProcess(device=device, num_timesteps=200)
-    model = ConditionalUNet1D(seq_len=256, channels=[32, 64, 128, 256, 512]).to(device)
+    diffusion = DiffusionProcess(device=device, num_timesteps=1500)
+    model = ConditionalUNet1D(seq_len=256, channels=[32, 64, 128, 256]).to(device)
     checkpoint = torch.load(model_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'], strict=True)
@@ -342,7 +382,8 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
         gen_data = generate_samples(
             model, diffusion, condition,
             num_samples=num_groups_per_year,
-            device=device
+            device=device,
+            steps=1500
         )
         for group_idx in range(num_groups_per_year):
             group_data = gen_data[group_idx:group_idx+1]
@@ -355,7 +396,7 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
             all_gen_samples.append(group_data)
             all_real_samples.append(real_data)
         metrics[f'year_{year}'] = year_metrics_list
-        save_visualizations(year_real_samples, year_gen_samples, year_metrics_list, year, output_dir)
+        save_visualizations(year_metrics_list, year_gen_samples, year_metrics_list, year, output_dir)
     
     gen_all = torch.cat(all_gen_samples, dim=0)
     real_all_subset = torch.cat(all_real_samples, dim=0)
