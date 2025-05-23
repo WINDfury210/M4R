@@ -360,7 +360,6 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
         model.load_state_dict(checkpoint, strict=True)
     model.eval()
     dataset = FinancialDataset(data_path)
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
     years = list(range(2017, 2025))
     num_groups_per_year = 10
     annual_dates = dataset.get_annual_start_dates(years)
@@ -381,7 +380,7 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
             model, diffusion, condition,
             num_samples=num_groups_per_year,
             device=device,
-            steps=1500
+            steps=1000
         )
         for group_idx in range(num_groups_per_year):
             group_data = gen_data[group_idx:group_idx+1]
@@ -394,7 +393,7 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
             all_gen_samples.append(group_data)
             all_real_samples.append(real_data)
         metrics[f'year_{year}'] = year_metrics_list
-        save_visualizations(year_metrics_list, year_gen_samples, year_metrics_list, year, output_dir)
+        # save_visualizations(year_metrics_list, year_gen_samples, year_metrics_list, year, output_dir)
     
     gen_all = torch.cat(all_gen_samples, dim=0)
     real_all_subset = torch.cat(all_real_samples, dim=0)
