@@ -153,7 +153,7 @@ class ConditionalUNet1D(nn.Module):
 # 2. Diffusion Process -------------------------------------------------------
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=1000, device="cpu"):
+    def __init__(self, num_timesteps=2000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         self.betas = self._linear_beta_schedule().to(device)
@@ -233,7 +233,7 @@ def mean_loss(pred, target):
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    diffusion = DiffusionProcess(num_timesteps=200, device=device)
+    diffusion = DiffusionProcess(num_timesteps=2000, device=device)
     dataset = FinancialDataset(config["data_path"])
     
     dataloader = DataLoader(
@@ -264,7 +264,7 @@ def train_model(config):
             std_loss_val = std_loss(pred_noise, noise)
             mean_loss_val = mean_loss(pred_noise, noise)
             
-            loss = mse_loss + 6.0 * acf_loss_val + 5.0 * std_loss_val + 3.0 * mean_loss_val
+            loss = mse_loss# + 6.0 * acf_loss_val + 5.0 * std_loss_val + 3.0 * mean_loss_val
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
