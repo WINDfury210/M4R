@@ -294,7 +294,7 @@ if __name__ == "__main__":
         "save_dir": "saved_models",
         "num_epochs": 1000,
         "batch_size": 64,
-        "channels": [32, 64, 128, 256, 512],
+        "channels": [32, 64, 128, 256, 512, 1024],
         "lr": 1e-5,
         "save_interval": 500
     }
