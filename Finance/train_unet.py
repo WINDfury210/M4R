@@ -264,7 +264,7 @@ def train_model(config):
             std_loss_val = std_loss(pred_noise, noise)
             mean_loss_val = mean_loss(pred_noise, noise)
             
-            loss = mse_loss# + 6.0 * acf_loss_val + 5.0 * std_loss_val + 3.0 * mean_loss_val
+            loss = mse_loss # + 6.0 * acf_loss_val + 5.0 * std_loss_val + 3.0 * mean_loss_val
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -294,7 +294,7 @@ if __name__ == "__main__":
         "save_dir": "saved_models",
         "num_epochs": 1000,
         "batch_size": 64,
-        "channels": [32, 64, 128, 256, 512, 1024],
+        "channels": [64, 128, 128, 256, 256, 512, 512, 1024],
         "lr": 1e-5,
         "save_interval": 500
     }

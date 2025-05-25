@@ -214,8 +214,8 @@ def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda",
     model.eval()
     labels = conditions["date"].repeat(num_samples, 1).to(device)
     year = conditions["date"][0, 0].item() * (2024 - 2017) + 2017
-    noise_scale = 0.05 if year in [2019, 2020, 2021] else 0.01
-    x = torch.randn(num_samples, 256, device=device) * noise_scale
+    # noise_scale = 0.05 if year in [2019, 2020, 2021] else 0.01
+    x = torch.randn(num_samples, 256, device=device) # * noise_scale
     for t in reversed(range(steps)):
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
@@ -352,7 +352,7 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
 def run_validation(model_path, data_path, output_dir="validation_results"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     diffusion = DiffusionProcess(device=device, num_timesteps=1500)
-    model = ConditionalUNet1D(seq_len=256, channels=[32, 64, 128, 256, 512, 1024]).to(device)
+    model = ConditionalUNet1D(seq_len=256, channels=[64, 128, 128, 256, 256, 512, 512, 1024]).to(device)
     checkpoint = torch.load(model_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'], strict=True)
@@ -380,7 +380,7 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
             model, diffusion, condition,
             num_samples=num_groups_per_year,
             device=device,
-            steps=1000
+            steps=2000
         )
         for group_idx in range(num_groups_per_year):
             group_data = gen_data[group_idx:group_idx+1]
