@@ -233,7 +233,7 @@ def mean_loss(pred, target):
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    diffusion = DiffusionProcess(num_timesteps=200, device=device)
+    diffusion = DiffusionProcess(num_timesteps=1000, device=device)
     dataset = FinancialDataset(config["data_path"])
     
     dataloader = DataLoader(
@@ -292,10 +292,10 @@ if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
-        "num_epochs": 1000,
+        "num_epochs": 2000,
         "batch_size": 64,
-        "channels": [64, 128, 256, 512, 1024],
-        "lr": 1e-5,
+        "channels": [32, 64, 128, 256, 512, 1024],
+        "lr": 1e-6,
         "save_interval": 500
     }
     os.makedirs(config["save_dir"], exist_ok=True)
