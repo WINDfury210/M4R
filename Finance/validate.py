@@ -351,7 +351,7 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
 
 def run_validation(model_path, data_path, output_dir="validation_results"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    diffusion = DiffusionProcess(device=device, num_timesteps=1500)
+    diffusion = DiffusionProcess(device=device, num_timesteps=1000)
     model = ConditionalUNet1D(seq_len=256, channels=[32, 64, 128, 256, 512, 1024]).to(device)
     checkpoint = torch.load(model_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
