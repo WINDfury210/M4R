@@ -42,7 +42,7 @@ class TimeEmbedding(nn.Module):
             return self.mlp(time)
 
 class SelfAttention1D(nn.Module):
-    def __init__(self, channels, num_heads=8):  # Increased heads
+    def __init__(self, channels, num_heads=8):
         super().__init__()
         self.num_heads = num_heads
         self.query = nn.Conv1d(channels, channels // 8, kernel_size=1)
@@ -50,7 +50,7 @@ class SelfAttention1D(nn.Module):
         self.value = nn.Conv1d(channels, channels, kernel_size=1)
         self.gamma = nn.Parameter(torch.zeros(1))
         self.softmax = nn.Softmax(dim=-1)
-        self.dropout = nn.Dropout(0.2)  # Added dropout
+        self.dropout = nn.Dropout(0.2)
 
     def forward(self, x):
         batch, ch, seq_len = x.size()
@@ -85,10 +85,11 @@ class ResidualBlock1D(nn.Module):
         out = self.ln2(out)
         out = out.permute(0, 2, 1)
         out += residual
-        return self.relu()
+        out = self.relu(out)  # Fixed: Pass 'out' to relu
+        return out
 
 class ConditionalUNet1D(nn.Module):
-    def __init__(self, seq_len=256, channels=[64, 128, 256, 512]):  # Aligned channels
+    def __init__(self, seq_len=256, channels=[64, 128, 256, 512]):
         super().__init__()
         self.seq_len = seq_len
         self.channels = channels
@@ -113,7 +114,7 @@ class ConditionalUNet1D(nn.Module):
             self.attentions.append(SelfAttention1D(out_channels, num_heads=8) if 0<i<len(channels) else nn.Identity())
             in_channels = out_channels
         self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
-        self.mid_attn = SelfAttention1D(channels[-1], num_heads=8)  # Added mid attention
+        self.mid_attn = SelfAttention1D(channels[-1], num_heads=8)
         self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
         self.decoder_convs = nn.ModuleList()
         self.decoder_res = nn.ModuleList()
@@ -139,7 +140,7 @@ class ConditionalUNet1D(nn.Module):
             x = attn(x)
             skips.append(x)
         x = self.mid_conv1(x)
-        x = self.mid_attn(x)  # Apply mid attention
+        x = self.mid_attn(x)
         cond = combined_cond.unsqueeze(-1)
         x = x + cond
         x = self.mid_conv2(x)
@@ -160,10 +161,10 @@ class ConditionalUNet1D(nn.Module):
 # 2. Diffusion Process -------------------------------------------------------
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=4000, device="cpu"):  # Increased steps
+    def __init__(self, num_timesteps=4000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
-        self.betas = self._sigmoid_beta_schedule().to(device)  # Sigmoid schedule
+        self.betas = self._sigmoid_beta_schedule().to(device)
         self.alphas = 1. - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
@@ -176,11 +177,11 @@ class DiffusionProcess:
         return betas
     
     def add_noise(self, x0, t, year=None):
-        noise_scale = 0.0005  # Default scale
+        noise_scale = 0.0005
         if year is not None:
-            year_std = {2019: 0.05, 2020: 0.06, 2021: 0.055}.get(year, 0.036374) / 1.0  # Scaled std
-            noise_scale = 0.005 * (year_std / 0.06)  # Dynamic scaling
-            noise_scale = min(noise_scale, 0.002)  # Cap
+            year_std = {2019: 0.05, 2020: 0.06, 2021: 0.055}.get(year, 0.036374) / 1.0
+            noise_scale = 0.005 * (year_std / 0.06)
+            noise_scale = min(noise_scale, 0.002)
         noise = torch.randn_like(x0, device=self.device) * noise_scale
         sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
@@ -196,6 +197,7 @@ class FinancialDataset(Dataset):
         # Scale data
         self.original_mean = self.sequences.mean().item()
         self.original_std = self.sequences.std().item()
+        self.scale_factor = scale_factor
         self.sequences = (self.sequences - self.original_mean) / self.original_std * scale_factor
         print(f"Scaled data - Mean: {self.sequences.mean().item():.6f}, Std: {self.sequences.std().item():.6f}")
         
@@ -252,7 +254,7 @@ def corr_loss(pred, target):
     losses = []
     epsilon = 1e-8
     for i in range(batch_size):
-        for lag in range(1, 6):  # Multi-lag
+        for lag in range(1, 6):
             p_lagged = pred[i, :-lag]
             p_next = pred[i, lag:]
             t_lagged = target[i, :-lag]
@@ -298,8 +300,8 @@ def ks_loss(pred, target):
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    diffusion = DiffusionProcess(num_timesteps=2000, device=device)
-    dataset = FinancialDataset(config["data_path"], scale_factor=1.0)  # Scale up
+    diffusion = DiffusionProcess(num_timesteps=4000, device=device)
+    dataset = FinancialDataset(config["data_path"], scale_factor=1.0)
     
     dataloader = DataLoader(
         dataset,
@@ -310,7 +312,7 @@ def train_model(config):
     
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["num_epochs"])
-    
+
     
     for epoch in range(config["num_epochs"]):
         model.train()
@@ -347,9 +349,7 @@ def train_model(config):
         
         scheduler.step()
         avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}, "
-              f"MSE: {mse_loss.item():.6f}",
-              f"Skew-Kurt: {skew_kurt_loss_val.item():.6f}")
+        print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}")
         
         if (epoch + 1) % config["save_interval"] == 0:
             torch.save({
@@ -366,10 +366,10 @@ if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
-        "num_epochs": 2000,  # Increased for convergence
+        "num_epochs": 2000,
         "batch_size": 64,
-        "channels": [64, 128, 256, 512, 1024],  # Aligned with model
-        "lr": 1e-5,  # Adjusted for stability
+        "channels": [64, 128, 256, 512, 1024],
+        "lr": 1e-5,
         "save_interval": 500
     }
     os.makedirs(config["save_dir"], exist_ok=True)
