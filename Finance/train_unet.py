@@ -44,18 +44,18 @@ class SelfAttention1D(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.query = nn.Conv1d(channels, channels // 8, kernel_size=1)
-        self.key = nn.Conv1d(channels, channels, kernel_size=1)  # 修正 key 的输出通道数
+        self.key = nn.Conv1d(channels, channels // 8, kernel_size=1)  # 恢复原始定义
         self.value = nn.Conv1d(channels, channels, kernel_size=1)
         self.gamma = nn.Parameter(torch.zeros(1))
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x):
         batch, ch, seq_len = x.size()
-        q = self.query(x).view(batch, -1, seq_len).permute(0, 2, 1)
-        k = self.key(x).view(batch, -1, seq_len)
-        v = self.value(x).view(batch, -1, seq_len)
-        attn = self.softmax(torch.bmm(q, k) / (ch // 8) ** 0.5)
-        out = torch.bmm(v, attn.permute(0, 2, 1)).view(batch, ch, seq_len)
+        q = self.query(x).view(batch, -1, seq_len).permute(0, 2, 1)  # [batch, seq_len, ch//8]
+        k = self.key(x).view(batch, -1, seq_len)  # [batch, ch//8, seq_len]
+        v = self.value(x).view(batch, -1, seq_len)  # [batch, ch, seq_len]
+        attn = self.softmax(torch.bmm(q, k) / (ch // 8) ** 0.5)  # [batch, seq_len, seq_len]
+        out = torch.bmm(v, attn.permute(0, 2, 1)).view(batch, ch, seq_len)  # [batch, ch, seq_len]
         return x + self.gamma * out
 
 class ResidualBlock1D(nn.Module):
@@ -107,6 +107,8 @@ class ConditionalUNet1D(nn.Module):
             self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
             self.attentions.append(SelfAttention1D(out_channels) if 0<i<len(channels) else nn.Identity())
             in_channels = out_channels
+        self.mid_block1 = ResidualBlock1D(channels[-1], channels[-1])  # 修正 mid_conv1
+        self.mid_block2 = ResidualBlock1D(channels[-1], channels[-1])  # 修正 mid_conv2
         self.decoder_convs = nn.ModuleList()
         self.decoder_res = nn.ModuleList()
         for i in range(len(channels)-1):
@@ -121,7 +123,7 @@ class ConditionalUNet1D(nn.Module):
     def forward(self, x, t, date):
         time_emb = self.time_embed(t)
         date_emb = self.date_embed(date)
-        combined_cond = time_emb + date_emb # Disable date embedding
+        combined_cond = time_emb + date_emb
         x = x.unsqueeze(1)
         x = self.input_conv(x)
         skips = []
@@ -130,10 +132,10 @@ class ConditionalUNet1D(nn.Module):
             x = res(x)
             x = attn(x)
             skips.append(x)
-        x = self.mid_conv1(x)
+        x = self.mid_block1(x)  # 使用 mid_block1
         cond = combined_cond.unsqueeze(-1)
         x = x + cond
-        x = self.mid_conv2(x)
+        x = self.mid_block2(x)  # 使用 mid_block2
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
             if x.shape[-1] != skip.shape[-1]:
@@ -151,7 +153,7 @@ class ConditionalUNet1D(nn.Module):
 # 2. Diffusion Process -------------------------------------------------------
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=2000, device="cpu"):
+    def __init__(self, num_timesteps=1000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         self.betas = self._linear_beta_schedule().to(device)
@@ -216,7 +218,7 @@ def acf_loss(pred, target):
     target_fft = torch.fft.rfft(target, dim=-1)
     pred_acf = torch.fft.irfft(pred_fft * pred_fft.conj(), dim=-1)
     target_acf = torch.fft.irfft(target_fft * target_fft.conj(), dim=-1)
-    pred_acf = pred_acf[:, 1:21] / (pred_acf[:, 0:1] + 1e-8)  # 增加稳定性
+    pred_acf = pred_acf[:, 1:21] / (pred_acf[:, 0:1] + 1e-8)
     target_acf = target_acf[:, 1:21] / (target_acf[:, 0:1] + 1e-8)
     return F.mse_loss(pred_acf, target_acf)
 
@@ -238,7 +240,7 @@ def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
     diffusion = DiffusionProcess(num_timesteps=2000, device=device)
-    dataset = FinancialDataset(config["data_path"], scale_factor=1.0)  # 添加标准化
+    dataset = FinancialDataset(config["data_path"], scale_factor=1.0)
     
     dataloader = DataLoader(
         dataset,
@@ -298,7 +300,7 @@ if __name__ == "__main__":
         "save_dir": "saved_models",
         "num_epochs": 2000,
         "batch_size": 64,
-        "channels": [32, 64, 128, 256, 512, 1024],  # 与模型定义一致
+        "channels": [32, 64, 128, 256, 512, 1024],
         "lr": 1e-6,
         "save_interval": 500
     }
