@@ -369,7 +369,7 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
 def run_validation(model_path, data_path, output_dir="validation_results"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     diffusion = DiffusionProcess(device=device, num_timesteps=2000)
-    model = ConditionalUNet1D(seq_len=256, channels=[64, 128, 256, 512, 1024]).to(device)
+    model = ConditionalUNet1D(seq_len=256, channels=[32, 64, 128, 256, 512, 1024]).to(device)
     checkpoint = torch.load(model_path, map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'], strict=True)
@@ -397,7 +397,7 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
             model, diffusion, condition,
             num_samples=num_groups_per_year,
             device=device,
-            steps=1000  # Increased for quality
+            steps=2000  # Increased for quality
         )
         # Inverse scale generated and real data
         gen_data = dataset.inverse_scale(gen_data)
