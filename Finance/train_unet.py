@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import os
+from scipy import stats
 
 # 1. Model Definitions --------------------------------------------------------
 
@@ -44,7 +45,7 @@ class SelfAttention1D(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.query = nn.Conv1d(channels, channels // 8, kernel_size=1)
-        self.key = nn.Conv1d(channels, channels // 8, kernel_size=1)  # 恢复原始定义
+        self.key = nn.Conv1d(channels, channels // 8, kernel_size=1)
         self.value = nn.Conv1d(channels, channels, kernel_size=1)
         self.gamma = nn.Parameter(torch.zeros(1))
         self.softmax = nn.Softmax(dim=-1)
@@ -107,8 +108,8 @@ class ConditionalUNet1D(nn.Module):
             self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
             self.attentions.append(SelfAttention1D(out_channels) if 0<i<len(channels) else nn.Identity())
             in_channels = out_channels
-        self.mid_block1 = ResidualBlock1D(channels[-1], channels[-1])  # 修正 mid_conv1
-        self.mid_block2 = ResidualBlock1D(channels[-1], channels[-1])  # 修正 mid_conv2
+        self.mid_block1 = ResidualBlock1D(channels[-1], channels[-1])
+        self.mid_block2 = ResidualBlock1D(channels[-1], channels[-1])
         self.decoder_convs = nn.ModuleList()
         self.decoder_res = nn.ModuleList()
         for i in range(len(channels)-1):
@@ -132,10 +133,10 @@ class ConditionalUNet1D(nn.Module):
             x = res(x)
             x = attn(x)
             skips.append(x)
-        x = self.mid_block1(x)  # 使用 mid_block1
+        x = self.mid_block1(x)
         cond = combined_cond.unsqueeze(-1)
         x = x + cond
-        x = self.mid_block2(x)  # 使用 mid_block2
+        x = self.mid_block2(x)
         for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
             skip = skips[-(i+1)]
             if x.shape[-1] != skip.shape[-1]:
@@ -153,7 +154,7 @@ class ConditionalUNet1D(nn.Module):
 # 2. Diffusion Process -------------------------------------------------------
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=1000, device="cpu"):
+    def __init__(self, num_timesteps=2000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         self.betas = self._linear_beta_schedule().to(device)
@@ -234,6 +235,17 @@ def mean_loss(pred, target):
     target_mean = target.mean(dim=-1)
     return F.mse_loss(pred_mean, target_mean)
 
+def ks_loss(pred, target):
+    """Compute KS statistic loss between predictions and target."""
+    batch_size = pred.size(0)
+    losses = []
+    for i in range(batch_size):
+        p = pred[i].detach().cpu().numpy()
+        t = target[i].detach().cpu().numpy()
+        ks_stat, _ = stats.ks_2samp(p, t)
+        losses.append(torch.tensor(ks_stat, device=pred.device))
+    return torch.stack(losses).mean()
+
 # 5. Training Function --------------------------------------------------------
 
 def train_model(config):
@@ -266,11 +278,12 @@ def train_model(config):
             pred_noise = model(noisy_x, t, dates)
             
             mse_loss = F.mse_loss(pred_noise, noise)
-            acf_loss_val = acf_loss(pred_noise, noise)
-            std_loss_val = std_loss(pred_noise, noise)
-            mean_loss_val = mean_loss(pred_noise, noise)
+            # acf_loss_val = acf_loss(pred_noise, noise)
+            # std_loss_val = std_loss(pred_noise, noise)
+            # mean_loss_val = mean_loss(pred_noise, noise)
+            ks_loss_val = ks_loss(pred_noise, noise)
             
-            loss = mse_loss  # + 6.0 * acf_loss_val + 5.0 * std_loss_val + 3.0 * mean_loss_val
+            loss = mse_loss + 0.5 * ks_loss_val  # Add KS loss with weight 0.5
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -279,9 +292,7 @@ def train_model(config):
         
         scheduler.step()
         avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}, "
-              f"MSE: {mse_loss.item():.6f}, ACF: {acf_loss_val.item():.6f}, "
-              f"Std: {std_loss_val.item():.6f}, Mean: {mean_loss_val.item():.6f}")
+        print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}, ")
         
         if (epoch + 1) % config["save_interval"] == 0:
             torch.save({
@@ -299,9 +310,9 @@ if __name__ == "__main__":
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
         "num_epochs": 2000,
-        "batch_size": 64,
-        "channels": [32, 64, 128, 256, 512, 1024],
-        "lr": 1e-6,
+        "batch_size": 16,  # Reduced from 64
+        "channels": [32, 128, 256, 512, 1024, 2048],
+        "lr": 5e-7,  # Reduced from 1e-6
         "save_interval": 500
     }
     os.makedirs(config["save_dir"], exist_ok=True)
