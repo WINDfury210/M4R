@@ -113,7 +113,7 @@ def ks_loss(pred, target):
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    diffusion = DiffusionProcess(num_timesteps=2000, device=device)
+    diffusion = DiffusionProcess(num_timesteps=1000, device=device)
     dataset = FinancialDataset(config["data_path"], scale_factor=1.0)
     
     dataloader = DataLoader(
@@ -147,7 +147,7 @@ def train_model(config):
             
             loss = mse_loss + ks_loss_val  # Add KS loss with weight 0.5
             loss.backward()
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             total_loss += loss.item()
@@ -172,9 +172,9 @@ if __name__ == "__main__":
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
         "num_epochs": 1000,
-        "batch_size": 32,  # Reduced from 64
-        "channels": [32, 128, 512, 1024, 2048],
-        "lr": 5e-7,  # Reduced from 1e-6
+        "batch_size": 64,  # Reduced from 64
+        "channels": [32, 64, 128, 512, 1024, 2048],
+        "lr": 1e-5,  # Reduced from 1e-6
         "save_interval": 500
     }
     os.makedirs(config["save_dir"], exist_ok=True)
