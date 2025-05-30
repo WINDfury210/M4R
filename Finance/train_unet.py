@@ -1,6 +1,6 @@
 """
 Diffusion Model Training Script
-Train ConditionalUNet1D with MSE, ACF, Std, Mean, and KS losses
+Train ConditionalUNet1D with MSE, ACF, Std, and Mean losses
 """
 
 import torch
@@ -10,12 +10,13 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import os
 from scipy import stats
-from model import ConditionalUNet1D  # Import model
+from model import ConditionalUNet1D
 
-# 1. Diffusion Process -------------------------------------------------------
+
+# 2. Diffusion Process -------------------------------------------------------
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=1000, device="cpu"):
+    def __init__(self, num_timesteps=2000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         self.betas = self._linear_beta_schedule().to(device)
@@ -33,7 +34,7 @@ class DiffusionProcess:
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
-# 2. Data Loading ------------------------------------------------------------
+# 3. Data Loading ------------------------------------------------------------
 
 class FinancialDataset(Dataset):
     def __init__(self, data_path, scale_factor=1.0):
@@ -70,7 +71,7 @@ class FinancialDataset(Dataset):
         closest_indices = torch.argsort(date_diffs)[:num_samples]
         return self.sequences[closest_indices], closest_indices
 
-# 3. Loss Functions -----------------------------------------------------------
+# 4. Loss Functions -----------------------------------------------------------
 
 def acf_loss(pred, target):
     """Compute MSE loss between ACF of predictions and target using FFT."""
@@ -107,12 +108,12 @@ def ks_loss(pred, target):
         losses.append(torch.tensor(ks_stat, device=pred.device))
     return torch.stack(losses).mean()
 
-# 4. Training Function --------------------------------------------------------
+# 5. Training Function --------------------------------------------------------
 
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    diffusion = DiffusionProcess(num_timesteps=1000, device=device)
+    diffusion = DiffusionProcess(num_timesteps=2000, device=device)
     dataset = FinancialDataset(config["data_path"], scale_factor=1.0)
     
     dataloader = DataLoader(
@@ -139,24 +140,21 @@ def train_model(config):
             pred_noise = model(noisy_x, t, dates)
             
             mse_loss = F.mse_loss(pred_noise, noise)
-            acf_loss_val = acf_loss(pred_noise, noise)
-            std_loss_val = std_loss(pred_noise, noise)
-            mean_loss_val = mean_loss(pred_noise, noise)
+            # acf_loss_val = acf_loss(pred_noise, noise)
+            # std_loss_val = std_loss(pred_noise, noise)
+            # mean_loss_val = mean_loss(pred_noise, noise)
             ks_loss_val = ks_loss(pred_noise, noise)
             
-            loss = mse_loss + 0.5 * ks_loss_val
+            loss = mse_loss + ks_loss_val  # Add KS loss with weight 0.5
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             total_loss += loss.item()
         
         scheduler.step()
         avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}, "
-              f"MSE: {mse_loss.item():.6f}, ACF: {acf_loss_val.item():.6f}, "
-              f"Std: {std_loss_val.item():.6f}, Mean: {mean_loss_val.item():.6f}, "
-              f"KS: {ks_loss_val.item():.6f}")
+        print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}, ")
         
         if (epoch + 1) % config["save_interval"] == 0:
             torch.save({
@@ -167,16 +165,16 @@ def train_model(config):
     
     torch.save(model.state_dict(), os.path.join(config["save_dir"], "final_model.pth"))
 
-# 5. Main --------------------------------------------------------------------
+# 6. Main --------------------------------------------------------------------
 
 if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
         "num_epochs": 1000,
-        "batch_size": 32,
-        "channels": [32, 64, 128, 256, 512, 1024, 2048],
-        "lr": 1e-5,
+        "batch_size": 32,  # Reduced from 64
+        "channels": [32, 128, 512, 1024, 2048],
+        "lr": 5e-7,  # Reduced from 1e-6
         "save_interval": 500
     }
     os.makedirs(config["save_dir"], exist_ok=True)

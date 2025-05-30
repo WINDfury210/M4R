@@ -1,10 +1,17 @@
 """
-Model definitions for ConditionalUNet1D and related components
+Diffusion Model Training Script
+Train ConditionalUNet1D with MSE, ACF, Std, and Mean losses
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import os
+from scipy import stats
+
+# 1. Model Definitions --------------------------------------------------------
 
 class TimeEmbedding(nn.Module):
     def __init__(self, dim, embedding_type="sinusoidal", hidden_dim=1024):
@@ -106,10 +113,10 @@ class ConditionalUNet1D(nn.Module):
         self.decoder_convs = nn.ModuleList()
         self.decoder_res = nn.ModuleList()
         for i in range(len(channels)-1):
-            in_channels = channels[-i-1] + channels[-i-1]
+            in_channels = channels[-1-i] + channels[-1-i]
             out_channels = channels[-2-i]
-            self.decoder_convs.append(nn.Conv1d(
-                in_channels, out_channels, kernel_size=3, stride=2, padding=1
+            self.decoder_convs.append(nn.ConvTranspose1d(
+                in_channels, out_channels, kernel_size=3, stride=2, padding=1, output_padding=1
             ))
             self.decoder_res.append(ResidualBlock1D(out_channels, out_channels))
         self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
