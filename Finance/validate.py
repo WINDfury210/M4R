@@ -1,6 +1,31 @@
 """
 Diffusion Model Validation Script
-Generate 10 sequences per year (2017-2024) with DDIM and compute per-sample metrics
+Generate 10 sequences per year (2017-2024) with DDPM and compute per-sample metrics
+
+### 计算指标清单
+
+`calculate_metrics` 函数为每个样本组和全局数据集计算以下指标，用于评估生成序列与真实序列的相似性：
+
+#### 全局统计（metrics['global']）
+- **real_mean**: 真实序列的均值，反映数据中心位置。
+- **gen_mean**: 生成序列的均值，与 real_mean 比较以评估偏差。
+- **real_std**: 真实序列的标准差，衡量波动性（目标 ~0.036374）。
+- **gen_std**: 生成序列的标准差，评估波动性匹配程度。
+- **real_corr**: 真实序列的滞后一阶自相关系数，反映相邻点的相关性。
+- **gen_corr**: 生成序列的滞后一阶自相关系数，评估时间依赖性。
+- **real_acf**: 真实序列的平均自相关（滞后 1-20），衡量长期时间结构。
+- **gen_acf**: 生成序列的平均自相关，评估时间模式匹配。
+- **ks_stat**: Kolmogorov-Smirnov 统计量，衡量分布差异（目标 < 0.05）。
+- **wass_dist**: Wasserstein 距离，评估分布的平滑差异。
+- **shapiro_pval**: 生成序列的 Shapiro-Wilk 正态性检验 p 值，评估正态性。
+- **real_skew**: 真实序列的偏度，衡量分布不对称性。
+- **gen_skew**: 生成序列的偏度，评估不对称性匹配。
+- **real_kurt**: 真实序列的峰度，衡量分布尾部形状。
+- **gen_kurt**: 生成序列的峰度，评估尾部特征。
+
+#### 每组样本统计（metrics['year_{year}']）
+- 每组样本（每年 10 组）计算上述指标（除全局统计外），用于逐样本分析。
+- 输出报告显示前 3 组样本的指标，包含均值、标准差、相关性、自相关、KS 统计量、Wasserstein 距离、偏度和峰度。
 """
 
 import json
@@ -9,161 +34,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-import matplotlib.pyplot as plt
+from torch.utils.data import Dataset
 from scipy import stats
 from statsmodels.tsa.stattools import acf
+import matplotlib.pyplot as plt
+from model import ConditionalUNet1D  # Import model
 
-# 1. Model Definitions --------------------------------------------------------
-
-class TimeEmbedding(nn.Module):
-    def __init__(self, dim, embedding_type="sinusoidal", hidden_dim=1024):
-        super().__init__()
-        self.dim = dim
-        self.embedding_type = embedding_type
-        if embedding_type == "sinusoidal":
-            half_dim = dim // 2
-            emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
-            emb = torch.exp(torch.arange(half_dim, dtype=torch.float) * -emb)
-            self.register_buffer("emb", emb)
-        elif embedding_type == "linear":
-            self.mlp = nn.Sequential(
-                nn.Linear(1, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, dim)
-            )
-
-    def forward(self, time):
-        if self.embedding_type == "sinusoidal":
-            emb = time[:, None] * self.emb[None, :]
-            emb = torch.cat((torch.sin(emb), torch.cos(emb)), dim=-1)
-            if self.dim % 2 == 1:
-                emb = F.pad(emb, (0, 1, 0, 0))
-            return emb
-        elif self.embedding_type == "linear":
-            time = time.unsqueeze(-1).float()
-            return self.mlp(time)
-
-class SelfAttention1D(nn.Module):
-    def __init__(self, channels, num_heads=8):  # Aligned with train_unet.py
-        super().__init__()
-        self.num_heads = num_heads
-        self.query = nn.Conv1d(channels, channels // 8, kernel_size=1)
-        self.key = nn.Conv1d(channels, channels // 8, kernel_size=1)
-        self.value = nn.Conv1d(channels, channels, kernel_size=1)
-        self.gamma = nn.Parameter(torch.zeros(1))
-        self.softmax = nn.Softmax(dim=-1)
-        self.dropout = nn.Dropout(0.2)  # Added dropout
-
-    def forward(self, x):
-        batch, ch, seq_len = x.size()
-        head_dim = ch // (8 * self.num_heads)
-        q = self.query(x).view(batch, self.num_heads, head_dim, seq_len).permute(0, 2, 1, 3)
-        k = self.key(x).view(batch, self.num_heads, head_dim, seq_len).permute(0, 2, 3, 1)
-        v = self.value(x).view(batch, self.num_heads, ch // self.num_heads, seq_len).permute(0, 2, 0, 3)
-        attn = self.softmax(torch.matmul(q, k) / (head_dim ** 0.5))
-        attn = self.dropout(attn)
-        out = torch.matmul(attn, v).permute(2, 1, 0, 3).contiguous().view(batch, ch, seq_len)
-        return x + self.gamma * out
-
-class ResidualBlock1D(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.ln1 = nn.LayerNorm(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.ln2 = nn.LayerNorm(out_channels)
-        self.relu = nn.ReLU(inplace=True)
-        self.shortcut = nn.Conv1d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
-
-    def forward(self, x):
-        residual = self.shortcut(x)
-        out = self.conv1(x)
-        out = out.permute(0, 2, 1)
-        out = self.ln1(out)
-        out = out.permute(0, 2, 1)
-        out = self.relu(out)
-        out = self.conv2(out)
-        out = out.permute(0, 2, 1)
-        out = self.ln2(out)
-        out = out.permute(0, 2, 1)
-        out += residual
-        return self.relu()
-
-class ConditionalUNet1D(nn.Module):
-    def __init__(self, seq_len=256, channels=[64, 128, 256, 512]):  # Aligned with train_unet.py
-        super().__init__()
-        self.seq_len = seq_len
-        self.channels = channels
-        self.num_levels = len(channels)
-        
-        self.time_embed = TimeEmbedding(dim=channels[-1], embedding_type="sinusoidal")
-        self.date_embed = nn.Sequential(
-            nn.Linear(3, 32),
-            nn.ReLU(),
-            nn.Linear(32, channels[-1]),
-            nn.LayerNorm(channels[-1])
-        )
-        self.input_conv = nn.Conv1d(1, channels[0], kernel_size=3, padding=1)
-        self.encoder_convs = nn.ModuleList()
-        self.encoder_res = nn.ModuleList()
-        self.attentions = nn.ModuleList()
-        in_channels = channels[0]
-        for i, out_channels in enumerate(channels):
-            self.encoder_convs.append(nn.Conv1d(in_channels, out_channels, kernel_size=3, 
-                                              stride=2 if i>0 else 1, padding=1))
-            self.encoder_res.append(ResidualBlock1D(out_channels, out_channels))
-            self.attentions.append(SelfAttention1D(out_channels, num_heads=8) if 0<i<len(channels) else nn.Identity())
-            in_channels = out_channels
-        self.mid_conv1 = ResidualBlock1D(channels[-1], channels[-1])
-        self.mid_attn = SelfAttention1D(channels[-1], num_heads=8)  # Added mid attention
-        self.mid_conv2 = ResidualBlock1D(channels[-1], channels[-1])
-        self.decoder_convs = nn.ModuleList()
-        self.decoder_res = nn.ModuleList()
-        for i in range(len(channels)-1):
-            in_channels = channels[-1-i] + channels[-1-i]
-            out_channels = channels[-2-i]
-            self.decoder_convs.append(nn.ConvTranspose1d(
-                in_channels, out_channels, kernel_size=3, stride=2, padding=1, output_padding=1
-            ))
-            self.decoder_res.append(ResidualBlock1D(out_channels, out_channels))
-        self.final_conv = nn.Conv1d(channels[0], 1, kernel_size=1)
-
-    def forward(self, x, t, date):
-        time_emb = self.time_embed(t)
-        date_emb = self.date_embed(date)
-        combined_cond = time_emb + date_emb
-        x = x.unsqueeze(1)
-        x = self.input_conv(x)
-        skips = []
-        for i, (conv, res, attn) in enumerate(zip(self.encoder_convs, self.encoder_res, self.attentions)):
-            x = F.relu(conv(x))
-            x = res(x)
-            x = attn(x)
-            skips.append(x)
-        x = self.mid_conv1(x)
-        x = self.mid_attn(x)
-        cond = combined_cond.unsqueeze(-1)
-        x = x + cond
-        x = self.mid_conv2(x)
-        for i, (conv, res) in enumerate(zip(self.decoder_convs, self.decoder_res)):
-            skip = skips[-(i+1)]
-            if x.shape[-1] != skip.shape[-1]:
-                if x.shape[-1] < skip.shape[-1]:
-                    pad_len = skip.shape[-1] - x.shape[-1]
-                    x = F.pad(x, (0, pad_len))
-                else:
-                    x = x[:, :, :skip.shape[-1]]
-            x = torch.cat([x, skip], dim=1)
-            x = F.relu(conv(x))
-            x = res(x)
-        x = self.final_conv(x).squeeze(1)
-        return x
-
-# 2. Diffusion Process -------------------------------------------------------
+# 1. Diffusion Process -------------------------------------------------------
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=4000, device="cpu"):  # Aligned with train_unet.py
+    def __init__(self, num_timesteps=1000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         self.betas = self._sigmoid_beta_schedule().to(device)
@@ -172,7 +52,10 @@ class DiffusionProcess:
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
         self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas)
-        self.posterior_variance = self.betas * (1. - self.alpha_bars[:-1]) / (1. - self.alpha_bars[1:])
+        # Posterior variance for DDPM
+        self.posterior_variance = torch.zeros_like(self.betas)
+        self.posterior_variance[1:] = self.betas[1:] * (1. - self.alpha_bars[:-1]) / (1. - self.alpha_bars[1:])
+        self.posterior_variance[0] = self.betas[0]
     
     def _sigmoid_beta_schedule(self):
         t = torch.linspace(0, 1, self.num_timesteps)
@@ -191,7 +74,7 @@ class DiffusionProcess:
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
-# 3. Data Loading ------------------------------------------------------------
+# 2. Data Loading ------------------------------------------------------------
 
 class FinancialDataset(Dataset):
     def __init__(self, data_path, scale_factor=1.0):
@@ -202,7 +85,7 @@ class FinancialDataset(Dataset):
         self.original_mean = self.sequences.mean().item()
         self.original_std = self.sequences.std().item()
         self.scale_factor = scale_factor
-        # Apply scaling (same as training)
+        # Apply scaling
         self.sequences = (self.sequences - self.original_mean) / self.original_std * scale_factor
         print(f"Scaled data - Mean: {self.sequences.mean().item():.6f}, Std: {self.sequences.std().item():.6f}")
         
@@ -225,32 +108,34 @@ class FinancialDataset(Dataset):
         return torch.stack(start_dates)
     
     def get_real_sequences_for_year(self, annual_date, num_samples=10):
-        date_diffs = torch.norm(self.dates - annual_date, dim=1)
+        date_diffs = torch.norm(self.dates - annual_date, dim=-1)
         closest_indices = torch.argsort(date_diffs)[:num_samples]
         return self.sequences[closest_indices], closest_indices
     
     def inverse_scale(self, sequences):
         """Reverse scaling to original data scale"""
-        return sequences / self.scale_factor * self.original_std + self.original_mean
+        return sequences * self.original_std / self.scale_factor + self.original_mean
 
-# 4. Validation Core ---------------------------------------------------------
+# 3. Validation Core ---------------------------------------------------------
 
 @torch.no_grad()
-def generate_samples(model, diffusion, conditions, num_samples=1, device="cuda", steps=4000):
-    """Generate samples with DDIM sampling"""
+def generate_samples(model, diffusion, condition, num_samples, device, steps=1000):
+    """Generate samples with DDPM sampling"""
     model.eval()
-    labels = conditions["date"].repeat(num_samples, 1).to(device)
-    year = int(conditions["date"][0, 0].item() * (2024 - 2017) + 2017)
+    labels = condition["date"].repeat(num_samples, 1).to(device)
+    year = int(condition["date"][0, 0].item() * (2024 - 2017) + 2017)
     x = torch.randn(num_samples, 256, device=device)
-    step_size = diffusion.num_timesteps // steps
-    for t in reversed(range(0, diffusion.num_timesteps, step_size)):
+    for t in reversed(range(diffusion.num_timesteps)):
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
-        alpha_bar_t = diffusion.alpha_bars[t].view(-1, 1)
-        alpha_bar_t_prev = diffusion.alpha_bars[max(t - step_size, 0)].view(-1, 1)
-        sigma_t = torch.sqrt((1 - alpha_bar_t_prev) / (1 - alpha_bar_t) * diffusion.betas[t]).view(-1, 1)
-        x = (torch.sqrt(alpha_bar_t_prev) / torch.sqrt(alpha_bar_t) * x +
-             (torch.sqrt(1 - alpha_bar_t_prev) - sigma_t * torch.sqrt(1 - alpha_bar_t)) * pred_noise)
+        # DDPM update
+        alpha_t = diffusion.alphas[t].view(-1, 1)
+        sqrt_one_minus_alpha_bar_t = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1)
+        posterior_variance_t = diffusion.posterior_variance[t].view(-1, 1)
+        noise = torch.randn_like(x) if t > 0 else torch.zeros_like(x)
+        x = (1 / torch.sqrt(alpha_t)) * (
+            x - ((1 - alpha_t) / sqrt_one_minus_alpha_bar_t) * pred_noise
+        ) + torch.sqrt(posterior_variance_t) * noise
         x = torch.clamp(x, -5, 5)
     print(f"Year {year}: Scaled Gen mean={x.mean().item():.6f}, std={x.std().item():.6f}")
     return x.cpu()
@@ -269,8 +154,8 @@ def calculate_metrics(real_data, generated_data):
     metrics['real_std'] = real_data.std().item()
     metrics['gen_std'] = generated_data.std().item()
     
-    real_data_np = real_data.numpy().flatten()
-    gen_data_np = generated_data.numpy().flatten()
+    real_data_np = real_data.cpu().numpy().flatten()
+    gen_data_np = generated_data.cpu().numpy().flatten()
     
     # Correlation
     real_lagged = real_data_np[:-1]
@@ -295,7 +180,7 @@ def calculate_metrics(real_data, generated_data):
     metrics['wass_dist'] = wass_dist
     
     # Shapiro-Wilk Test
-    _, shapiro_pval = stats.shapiro(gen_data_np)
+    _, shapiro_pval = stats.shapiro(gen_data_np[:5000])  # Limit for Shapiro
     metrics['shapiro_pval'] = shapiro_pval
     
     # Skewness and Kurtosis
@@ -324,7 +209,7 @@ def print_enhanced_report(metrics_dict, years):
     print(f"{'Skew':<12} {global_stats['real_skew']:>12.6f} {global_stats['gen_skew']:>12.6f}")
     print(f"{'Kurtosis':<12} {global_stats['real_kurt']:>12.6f} {global_stats['gen_kurt']:>12.6f}")
     
-    # Per-Sample Statistics (First 3 samples per year)
+    # Per-sample statistics (first 3 samples per year)
     print("\n[Per-Sample Statistics]")
     print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
     print("-" * 50)
@@ -366,38 +251,38 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
 
 # 5. Main Validation Function ------------------------------------------------
 
-def run_validation(model_path, data_path, output_dir="validation_results"):
+def run_validation(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    diffusion = DiffusionProcess(device=device, num_timesteps=2000)
-    model = ConditionalUNet1D(seq_len=256, channels=[32, 128, 256, 512, 1024, 2048]).to(device)
-    checkpoint = torch.load(model_path, map_location=device)
+    diffusion = DiffusionProcess(device=device, num_timesteps=1000)
+    model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
+    checkpoint = torch.load(config["model_path"], map_location=device)
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'], strict=True)
     else:
         model.load_state_dict(checkpoint, strict=True)
     model.eval()
-    dataset = FinancialDataset(data_path, scale_factor=1.0)  # Apply same scaling as training
+    dataset = FinancialDataset(config["data_path"], scale_factor=1.0)  # Same scaling as training
     years = list(range(2017, 2025))
     num_groups_per_year = 10
-    annual_dates = dataset.get_annual_start_dates(years)
+    annual_dates = dataset.get_annual_start_dates(years).to(device)
     metrics = {}
     all_gen_samples = []
     all_real_samples = []
     
-    for year_idx, year in enumerate(years):
+    for year in years:
+        year_idx = year - 2017  # Compute index for annual_dates
         annual_date = annual_dates[year_idx].to(device)
         condition = {"date": annual_date.unsqueeze(0)}
         real_sequences, _ = dataset.get_real_sequences_for_year(
-            annual_date.cpu(), num_samples=num_groups_per_year
-        )
+            annual_date.cpu(), num_samples=num_groups_per_year)
         year_metrics_list = []
         year_gen_samples = []
-        year_real_samples = []
+        year_real_samples = []  # Initialize list
         gen_data = generate_samples(
             model, diffusion, condition,
             num_samples=num_groups_per_year,
             device=device,
-            steps=2000  # Increased for quality
+            steps=1000
         )
         # Inverse scale generated and real data
         gen_data = dataset.inverse_scale(gen_data)
@@ -410,19 +295,23 @@ def run_validation(model_path, data_path, output_dir="validation_results"):
             if group_idx < 3:
                 year_real_samples.append(real_data.squeeze())
                 year_gen_samples.append(group_data.squeeze())
-            all_gen_samples.append(group_data)
-            all_real_samples.append(real_data)
+            all_gen_samples.append(group_data.squeeze())
+            all_real_samples.append(real_data.squeeze())
         metrics[f'year_{year}'] = year_metrics_list
-        save_visualizations(year_real_samples, year_gen_samples, year_metrics_list, year, output_dir)
+        save_visualizations(year_real_samples, year_gen_samples, year_metrics_list, year, config["save_dir"])
     
     gen_all = torch.cat(all_gen_samples, dim=0)
     real_all_subset = torch.cat(all_real_samples, dim=0)
     metrics['global'] = calculate_metrics(real_all_subset, gen_all)
     print_enhanced_report(metrics, years)
-    print(f"\nValidation complete! Results saved to {output_dir}")
+    print(f"\nValidation complete! Results saved to {config['save_dir']}")
 
 if __name__ == "__main__":
-    run_validation(
-        model_path="saved_models/final_model.pth",
-        data_path="financial_data/sequences/sequences_256.pt"
-    )
+    config = {
+        "model_path": "saved_models/final_model.pth",
+        "data_path": "financial_data/sequences/sequences_256.pt",
+        "save_dir": "validation_results",
+        "channels": [32, 128, 256, 512, 1024, 2048]
+    }
+    os.makedirs(config["save_dir"], exist_ok=True)
+    run_validation(config)
