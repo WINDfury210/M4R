@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import logging
+from datetime import datetime
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -30,19 +31,52 @@ sample_indices = np.random.choice(len(sequences), num_samples, replace=False)
 sample_sequences = sequences[sample_indices]
 sample_dates = start_dates[sample_indices]
 
-# 绘制序列
-plt.figure(figsize=(12, 6))
-for i in range(num_samples):
-    plt.plot(range(256), sample_sequences[i], label=f'Sequence {i+1} (Start: {sample_dates[i]})')
+# 反归一化起始日期
+def denormalize_date(normalized_date):
+    year = int(normalized_date[0] * 8 + 2017)
+    month = int(normalized_date[1] * 12 + 1)
+    day = int(normalized_date[2] * 31 + 1)
+    # 确保日期有效
+    try:
+        return datetime(year, month, day).strftime("%Y-%m-%d")
+    except ValueError:
+        # 如果日期无效（如 2 月 30 日），调整为当月最后一天
+        if month == 2 and day > 28:
+            day = 28 if year % 4 != 0 else 29
+        elif day == 31 and month in [4, 6, 9, 11]:
+            day = 30
+        return datetime(year, month, day).strftime("%Y-%m-%d")
 
-plt.title('Sample Daily Log-Return Sequences (256 Days)')
-plt.xlabel('Day')
-plt.ylabel('Log-Return')
-plt.legend()
-plt.grid(True)
+# 计算统计量
+means = np.mean(sample_sequences, axis=1)
+stds = np.std(sample_sequences, axis=1)
+
+# 自定义颜色（使用柔和的调色板）
+colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']  # 蓝色、橙色、绿色、红色、紫色
+
+# 绘制序列
+plt.figure(figsize=(12, 8))
+for i in range(num_samples):
+    date_str = denormalize_date(sample_dates[i])
+    mean_val = means[i]
+    std_val = stds[i]
+    label = f'Sequence {i+1} (Start: {date_str}, Mean: {mean_val:.4f}, Std: {std_val:.4f})'
+    plt.plot(range(256), sample_sequences[i], label=label, color=colors[i % len(colors)], linewidth=1.5)
+
+plt.title('Sample Daily Log-Return Sequences (256 Days)', fontsize=14, pad=15)
+plt.xlabel('Day', fontsize=12)
+plt.ylabel('Log-Return', fontsize=12)
+plt.legend(loc='upper right', fontsize=10, framealpha=0.8)
+plt.grid(True, linestyle='--', alpha=0.7)
 plt.tight_layout()
 
 # 保存图片
 plt.savefig(output_file, dpi=300)
 logger.info(f"Saved sample sequences plot to {output_file}")
 plt.close()
+
+# 打印统计量总览
+logger.info("Statistical Summary of Sampled Sequences:")
+for i in range(num_samples):
+    date_str = denormalize_date(sample_dates[i])
+    logger.info(f"Sequence {i+1} (Start: {date_str}): Mean = {means[i]:.4f}, Std = {std_val:.4f}")
