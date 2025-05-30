@@ -282,7 +282,7 @@ def run_validation(config):
             model, diffusion, condition,
             num_samples=num_groups_per_year,
             device=device,
-            steps=1000
+            steps=2000
         )
         # Inverse scale generated and real data
         gen_data = dataset.inverse_scale(gen_data)
