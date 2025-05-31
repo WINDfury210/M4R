@@ -51,8 +51,8 @@ def denormalize_date(normalized_date):
 means = np.mean(sample_sequences, axis=1)
 stds = np.std(sample_sequences, axis=1)
 
-# 自定义颜色（使用柔和的调色板）
-colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']  # 蓝色、橙色、绿色、红色、紫色
+# 金融绘图色彩配置：使用蓝色渐变
+colors = plt.cm.Blues(np.linspace(0.3, 0.9, num_samples))  # 从浅蓝到深蓝渐变
 
 # 绘制序列
 plt.figure(figsize=(12, 8))
@@ -61,7 +61,7 @@ for i in range(num_samples):
     mean_val = means[i]
     std_val = stds[i]
     label = f'Sequence {i+1} (Start: {date_str}, Mean: {mean_val:.4f}, Std: {std_val:.4f})'
-    plt.plot(range(256), sample_sequences[i], label=label, color=colors[i % len(colors)], linewidth=1.5)
+    plt.plot(range(256), sample_sequences[i], label=label, color=colors[i], linewidth=1.5, alpha=0.8)
 
 plt.title('Sample Daily Log-Return Sequences (256 Days)', fontsize=14, pad=15)
 plt.xlabel('Day', fontsize=12)
@@ -79,4 +79,4 @@ plt.close()
 logger.info("Statistical Summary of Sampled Sequences:")
 for i in range(num_samples):
     date_str = denormalize_date(sample_dates[i])
-    logger.info(f"Sequence {i+1} (Start: {date_str}): Mean = {means[i]:.4f}, Std = {std_val:.4f}")
+    logger.info(f"Sequence {i+1} (Start: {date_str}): Mean = {means[i]:.4f}, Std = {stds[i]:.4f}")
