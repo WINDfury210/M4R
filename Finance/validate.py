@@ -171,15 +171,25 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
         fft_result = np.fft.rfft(seq.numpy() - seq.numpy().mean())  # Remove mean
         power = np.abs(fft_result) ** 2
         real_power.append(power)
-    real_power = np.array(real_power)
-    mean_power = np.mean(real_power, axis=0)
-    quantiles = np.quantile(real_power, [0.25, 0.75], axis=0)
+    real_power = np.array(real_power)  # Shape: (num_samples, 129)
     
-    # Normalize frequencies and power
+    # Normalize each sequence's power spectrum individually
+    real_power = real_power / np.sum(real_power, axis=1, keepdims=True)  # Shape: (num_samples, 129)
+    
+    # Compute mean and quantiles after normalization
+    mean_power = np.mean(real_power, axis=0)  # Shape: (129,)
+    quantiles = np.quantile(real_power, [0.25, 0.75], axis=0)  # Shape: (2, 129)
+    
+    # Normalize frequencies
     freqs = np.linspace(0, 0.5, len(mean_power))
-    mean_power = mean_power / np.sum(mean_power)
-    quantiles = quantiles / np.sum(real_power, axis=1, keepdims=True).mean()
     
+    # Plot real sequence power spectrum with shaded area and quantile lines
+    plt.fill_between(freqs, 10 * np.log10(quantiles[0] + 1e-10), 10 * np.log10(quantiles[1] + 1e-10),
+                     color='gray', alpha=0.1, label='Real 25%-75% Quantile')
+    plt.plot(freqs, 10 * np.log10(quantiles[0] + 1e-10), color='gray', linestyle='--', linewidth=1.5, label='Real 25% Quantile')
+    plt.plot(freqs, 10 * np.log10(quantiles[1] + 1e-10), color='gray', linestyle='--', linewidth=1.5, label='Real 75% Quantile')
+    plt.plot(freqs, 10 * np.log10(mean_power + 1e-10), color='black', label='Real Mean', linewidth=2)
+
     # Compute power spectrum for generated intermediate sequences
     colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(gen_intermediate)))
     for i, (t, gen_seqs) in enumerate(sorted(gen_intermediate.items())):
@@ -188,14 +198,14 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
             fft_result = np.fft.rfft(seq.numpy() - seq.numpy().mean())
             power = np.abs(fft_result) ** 2
             gen_power.append(power)
-        gen_power = np.array(gen_power)
-        mean_gen_power = np.mean(gen_power, axis=0) / np.sum(gen_power)
-        print(mean_gen_power.shape)
-        plt.plot(freqs, 10 * np.log10(mean_gen_power.T + 1e-10), color=colors[i], linewidth=1.5, alpha=0.2)
-        
-    plt.plot(freqs, 10 * np.log10(mean_power + 1e-10), color='black', label='Real Mean', linewidth=2)
-    plt.fill_between(freqs, 10 * np.log10(quantiles[0] + 1e-10), 10 * np.log10(quantiles[1] + 1e-10),
-                     color='gray', alpha=0.1, label='Real 25%-75% Quantile')
+        gen_power = np.array(gen_power)  # Shape: (num_samples, 129)
+        if gen_power.shape[0] > 0:  # Ensure non-empty
+            gen_power = gen_power / np.sum(gen_power, axis=1, keepdims=True)  # Normalize
+            mean_gen_power = np.mean(gen_power, axis=0)  # Shape: (129,)
+            print(f"Timestep {t}: mean_gen_power shape = {mean_gen_power.shape}")
+            plt.plot(freqs, 10 * np.log10(mean_gen_power + 1e-10), color=colors[i], 
+                     label=f'Gen t={t}', linewidth=1.5, alpha=0.7)
+    
     # Customize plot
     plt.xlabel('Frequency (cycles/day)')
     plt.ylabel('Power (dB)')
