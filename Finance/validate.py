@@ -30,7 +30,6 @@ class DiffusionProcess:
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
-
 # 2. Data Loading ------------------------------------------------------------
 
 class FinancialDataset(Dataset):
@@ -82,26 +81,34 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
     labels = condition["date"].repeat(num_samples, 1).to(device)
     year = int(condition["date"][0, 0].item() * (2024 - 2017) + 2017)
     x = torch.randn(num_samples, 256, device=device)
-    intermediate_samples = {t: [] for t in [100, 300, 500, 700, 900]}
-    step_indices = torch.linspace(diffusion.num_timesteps - 1, 0, steps + 1, dtype=torch.long, device=device)
+    intermediate_samples = {100: [], 300: [], 500: [], 700: [], 900: []}
+    # Adjust step_indices to match num_timesteps
+    step_indices = torch.linspace(diffusion.num_timesteps - 1, 0, steps, dtype=torch.long, device=device)
     for i in range(steps):
         t = step_indices[i]
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
         # DDPM update
-        
         sqrt_one_minus_alpha_bar = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1)
-
         alpha_t = diffusion.alphas[t].view(-1, 1)
         beta_t = diffusion.betas[t].view(-1, 1)
         x = (x - (1 - alpha_t) / sqrt_one_minus_alpha_bar * pred_noise) / torch.sqrt(alpha_t)
         if t > 0:
             x = x + torch.sqrt(beta_t) * torch.randn_like(x)
-
-        if t in intermediate_samples:
-            intermediate_samples[t].append(x.cpu())
+        # Save intermediate samples at specific timesteps
+        target_ts = [100, 300, 500, 700, 900]
+        if int(t) in target_ts:
+            intermediate_samples[int(t)].append(x.cpu())
     print(f"Year {year}: Scaled Gen mean={x.mean().item():.6f}, std={x.std().item():.6f}")
-    return x.cpu(), {t: torch.stack(samples, dim=0)[:10] for t, samples in intermediate_samples.items()}
+    # Stack intermediate samples, handle empty cases
+    gen_intermediate = {}
+    for t in intermediate_samples:
+        if intermediate_samples[t]:
+            gen_intermediate[t] = torch.stack(intermediate_samples[t], dim=0)[:10]
+        else:
+            print(f"Warning: No samples saved for t={t}")
+            gen_intermediate[t] = torch.zeros(10, num_samples, 256)  # Fallback
+    return x.cpu(), gen_intermediate
 
 def calculate_metrics(real_data, generated_data):
     metrics = {}
@@ -179,8 +186,8 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
                      color='gray', alpha=0.3, label='Real 25%-75% Quantile')
 
     # Compute power spectrum for generated intermediate sequences
-    colors = plt.cm.Blues(np.linspace(0.3, 0.9, 5))
-    for i, (t, gen_seqs) in enumerate(gen_intermediate.items()):
+    colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(gen_intermediate)))
+    for i, (t, gen_seqs) in enumerate(sorted(gen_intermediate.items())):
         gen_power = []
         for seq in gen_seqs[:num_samples]:
             fft_result = np.fft.rfft(seq.numpy() - seq.numpy().mean())
@@ -193,7 +200,7 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
     # Customize plot
     plt.xlabel('Frequency (cycles/day)')
     plt.ylabel('Power (dB)')
-    plt.ylim(-60, 0)  # Adjusted for log scale from 10^-6 to 10^-2
+    plt.ylim(-60, 0)
     plt.xlim(0, 0.5)
     plt.title('Power Spectrum Comparison: Real vs Generated Sequences')
     plt.legend()
@@ -302,7 +309,7 @@ def run_validation(config):
             model, diffusion, condition,
             num_samples=num_groups_per_year,
             device=device,
-            steps=2000
+            steps=1000  # Match num_timesteps
         )
         # Inverse scale generated and real data
         gen_data = dataset.inverse_scale(gen_data)
