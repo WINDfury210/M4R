@@ -20,10 +20,6 @@ class DiffusionProcess:
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
         self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas)
-        # Posterior variance for DDPM
-        self.posterior_variance = torch.zeros_like(self.betas)
-        self.posterior_variance[1:] = self.betas[1:] * (1. - self.alpha_bars[:-1]) / (1. - self.alpha_bars[1:])
-        self.posterior_variance[0] = self.betas[0]
     
     def _linear_beta_schedule(self):
         return torch.linspace(1e-4, 0.02, self.num_timesteps)
@@ -34,19 +30,6 @@ class DiffusionProcess:
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
-    def sample_intermediate(self, model, x, t, labels):
-        """Generate intermediate noisy samples at specific timesteps"""
-        model.eval()
-        with torch.no_grad():
-            pred_noise = model(x, t, labels)
-            alpha_t = self.alphas[t].view(-1, 1)
-            sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
-            posterior_variance_t = self.posterior_variance[t].view(-1, 1)
-            noise = torch.randn_like(x) if t > 0 else torch.zeros_like(x)
-            x_next = (1 / torch.sqrt(alpha_t)) * (
-                x - ((1 - alpha_t) / sqrt_one_minus_alpha_bar_t) * pred_noise
-            ) + torch.sqrt(posterior_variance_t) * noise
-            return torch.clamp(x_next, -5, 5)
 
 # 2. Data Loading ------------------------------------------------------------
 
@@ -100,18 +83,21 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
     year = int(condition["date"][0, 0].item() * (2024 - 2017) + 2017)
     x = torch.randn(num_samples, 256, device=device)
     intermediate_samples = {t: [] for t in [100, 300, 500, 700, 900]}
-    for t in reversed(range(diffusion.num_timesteps)):
+    step_indices = torch.linspace(diffusion.num_timesteps - 1, 0, steps + 1, dtype=torch.long, device=device)
+    for i in range(steps):
+        t = step_indices[i]
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
         # DDPM update
+        
+        sqrt_one_minus_alpha_bar = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1)
+
         alpha_t = diffusion.alphas[t].view(-1, 1)
-        sqrt_one_minus_alpha_bar_t = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1)
-        posterior_variance_t = diffusion.posterior_variance[t].view(-1, 1)
-        noise = torch.randn_like(x) if t > 0 else torch.zeros_like(x)
-        x = (1 / torch.sqrt(alpha_t)) * (
-            x - ((1 - alpha_t) / sqrt_one_minus_alpha_bar_t) * pred_noise
-        ) + torch.sqrt(posterior_variance_t) * noise
-        x = torch.clamp(x, -5, 5)
+        beta_t = diffusion.betas[t].view(-1, 1)
+        x = (x - (1 - alpha_t) / sqrt_one_minus_alpha_bar * pred_noise) / torch.sqrt(alpha_t)
+        if t > 0:
+            x = x + torch.sqrt(beta_t) * torch.randn_like(x)
+
         if t in intermediate_samples:
             intermediate_samples[t].append(x.cpu())
     print(f"Year {year}: Scaled Gen mean={x.mean().item():.6f}, std={x.std().item():.6f}")
