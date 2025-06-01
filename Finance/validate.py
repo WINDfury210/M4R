@@ -98,7 +98,7 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
         target_ts = [100, 300, 500, 700, 900]
         if int(t) in target_ts:
             intermediate_samples[int(t)].append(x.cpu())
-    print(f"Year {year}: Scaled Gen mean={x.mean().item():.6f}, std={x.std().item():.6f}")
+            
     # Stack intermediate samples, handle empty cases
     gen_intermediate = {}
     for t in intermediate_samples:
@@ -107,6 +107,7 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
         else:
             print(f"Warning: No samples saved for t={t}")
             gen_intermediate[t] = torch.zeros(10, num_samples, 256)  # Fallback
+    
     return x.cpu(), gen_intermediate
 
 def calculate_metrics(real_data, generated_data):
@@ -172,7 +173,6 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
         real_power.append(power)
     real_power = np.array(real_power)
     mean_power = np.mean(real_power, axis=0)
-    print(mean_power.shape)
     quantiles = np.quantile(real_power, [0.25, 0.75], axis=0)
     
     # Normalize frequencies and power
@@ -195,6 +195,7 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
             gen_power.append(power)
         gen_power = np.array(gen_power)
         mean_gen_power = np.mean(gen_power, axis=0) / np.sum(gen_power)
+        print(mean_gen_power.shape)
         plt.plot(freqs, 10 * np.log10(mean_gen_power + 1e-10), color=colors[i], label=f'Gen t={t}', linewidth=1.5)
     
     # Customize plot
