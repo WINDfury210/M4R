@@ -14,7 +14,7 @@ class DiffusionProcess:
     def __init__(self, num_timesteps=1000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
-        self.betas = self._sigmoid_beta_schedule().to(device)
+        self.betas = self._linear_beta_schedule().to(device)
         self.alphas = 1. - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
@@ -25,24 +25,16 @@ class DiffusionProcess:
         self.posterior_variance[1:] = self.betas[1:] * (1. - self.alpha_bars[:-1]) / (1. - self.alpha_bars[1:])
         self.posterior_variance[0] = self.betas[0]
     
-    def _sigmoid_beta_schedule(self):
-        t = torch.linspace(0, 1, self.num_timesteps)
-        s = 0.015
-        betas = 0.0001 + (0.01 - 0.0001) * torch.sigmoid(10 * (t - s))
-        return betas
+    def _linear_beta_schedule(self):
+        return torch.linspace(1e-4, 0.02, self.num_timesteps)
     
-    def add_noise(self, x0, t, year=None):
-        noise_scale = 0.0005
-        if year is not None:
-            year_std = {2019: 0.05, 2020: 0.06, 2021: 0.055}.get(year, 0.036374) / 1.0
-            noise_scale = 0.005 * (year_std / 0.06)
-            noise_scale = min(noise_scale, 0.002)
-        noise = torch.randn_like(x0, device=self.device) * noise_scale
+    def add_noise(self, x0, t):
+        noise = torch.randn_like(x0, device=self.device)
         sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
 
-    def sample_intermediate(self, model, x, t, labels, year=None):
+    def sample_intermediate(self, model, x, t, labels):
         """Generate intermediate noisy samples at specific timesteps"""
         model.eval()
         with torch.no_grad():
@@ -157,7 +149,7 @@ def calculate_metrics(real_data, generated_data):
     metrics['gen_acf'] = gen_acf
     
     # KS Statistic
-    ks_stat, ks_pval = stats.ks_2samp(real_data_np, gen_data_np)
+    ks_stat, _ = stats.ks_2samp(real_data_np, gen_data_np)
     metrics['ks_stat'] = ks_stat
     
     # Wasserstein Distance
