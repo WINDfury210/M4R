@@ -180,11 +180,6 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
     mean_power = mean_power / np.sum(mean_power)
     quantiles = quantiles / np.sum(real_power, axis=1, keepdims=True).mean()
     
-    # Plot real sequence power spectrum
-    plt.plot(freqs, 10 * np.log10(mean_power + 1e-10), color='black', label='Real Mean', linewidth=2)
-    plt.fill_between(freqs, 10 * np.log10(quantiles[0] + 1e-10), 10 * np.log10(quantiles[1] + 1e-10),
-                     color='gray', alpha=0.3, label='Real 25%-75% Quantile')
-
     # Compute power spectrum for generated intermediate sequences
     colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(gen_intermediate)))
     for i, (t, gen_seqs) in enumerate(sorted(gen_intermediate.items())):
@@ -196,8 +191,11 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
         gen_power = np.array(gen_power)
         mean_gen_power = np.mean(gen_power, axis=0) / np.sum(gen_power)
         print(mean_gen_power.shape)
-        plt.plot(freqs, 10 * np.log10(mean_gen_power.T + 1e-10), color=colors[i], label=f'Gen t={t}', linewidth=1.5)
-    
+        plt.plot(freqs, 10 * np.log10(mean_gen_power.T + 1e-10), color=colors[i], linewidth=1.5, alpha=0.2)
+        
+    plt.plot(freqs, 10 * np.log10(mean_power + 1e-10), color='black', label='Real Mean', linewidth=2)
+    plt.fill_between(freqs, 10 * np.log10(quantiles[0] + 1e-10), 10 * np.log10(quantiles[1] + 1e-10),
+                     color='gray', alpha=0.1, label='Real 25%-75% Quantile')
     # Customize plot
     plt.xlabel('Frequency (cycles/day)')
     plt.ylabel('Power (dB)')
