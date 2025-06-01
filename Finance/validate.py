@@ -1,33 +1,3 @@
-"""
-Diffusion Model Validation Script
-Generate 10 sequences per year (2017-2024) with DDPM and compute per-sample metrics
-
-### 计算指标清单
-
-`calculate_metrics` 函数为每个样本组和全局数据集计算以下指标，用于评估生成序列与真实序列的相似性：
-
-#### 全局统计（metrics['global']）
-- **real_mean**: 真实序列的均值，反映数据中心位置。
-- **gen_mean**: 生成序列的均值，与 real_mean 比较以评估偏差。
-- **real_std**: 真实序列的标准差，衡量波动性（目标 ~0.036374）。
-- **gen_std**: 生成序列的标准差，评估波动性匹配程度。
-- **real_corr**: 真实序列的滞后一阶自相关系数，反映相邻点的相关性。
-- **gen_corr**: 生成序列的滞后一阶自相关系数，评估时间依赖性。
-- **real_acf**: 真实序列的平均自相关（滞后 1-20），衡量长期时间结构。
-- **gen_acf**: 生成序列的平均自相关，评估时间模式匹配。
-- **ks_stat**: Kolmogorov-Smirnov 统计量，衡量分布差异（目标 < 0.05）。
-- **wass_dist**: Wasserstein 距离，评估分布的平滑差异。
-- **shapiro_pval**: 生成序列的 Shapiro-Wilk 正态性检验 p 值，评估正态性。
-- **real_skew**: 真实序列的偏度，衡量分布不对称性。
-- **gen_skew**: 生成序列的偏度，评估不对称性匹配。
-- **real_kurt**: 真实序列的峰度，衡量分布尾部形状。
-- **gen_kurt**: 生成序列的峰度，评估尾部特征。
-
-#### 每组样本统计（metrics['year_{year}']）
-- 每组样本（每年 10 组）计算上述指标（除全局统计外），用于逐样本分析。
-- 输出报告显示前 3 组样本的指标，包含均值、标准差、相关性、自相关、KS 统计量、Wasserstein 距离、偏度和峰度。
-"""
-
 import json
 import os
 import numpy as np
@@ -73,6 +43,20 @@ class DiffusionProcess:
         sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
+
+    def sample_intermediate(self, model, x, t, labels, year=None):
+        """Generate intermediate noisy samples at specific timesteps"""
+        model.eval()
+        with torch.no_grad():
+            pred_noise = model(x, t, labels)
+            alpha_t = self.alphas[t].view(-1, 1)
+            sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
+            posterior_variance_t = self.posterior_variance[t].view(-1, 1)
+            noise = torch.randn_like(x) if t > 0 else torch.zeros_like(x)
+            x_next = (1 / torch.sqrt(alpha_t)) * (
+                x - ((1 - alpha_t) / sqrt_one_minus_alpha_bar_t) * pred_noise
+            ) + torch.sqrt(posterior_variance_t) * noise
+            return torch.clamp(x_next, -5, 5)
 
 # 2. Data Loading ------------------------------------------------------------
 
@@ -125,6 +109,7 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
     labels = condition["date"].repeat(num_samples, 1).to(device)
     year = int(condition["date"][0, 0].item() * (2024 - 2017) + 2017)
     x = torch.randn(num_samples, 256, device=device)
+    intermediate_samples = {t: [] for t in [100, 300, 500, 700, 900]}
     for t in reversed(range(diffusion.num_timesteps)):
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
@@ -137,8 +122,10 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
             x - ((1 - alpha_t) / sqrt_one_minus_alpha_bar_t) * pred_noise
         ) + torch.sqrt(posterior_variance_t) * noise
         x = torch.clamp(x, -5, 5)
+        if t in intermediate_samples:
+            intermediate_samples[t].append(x.cpu())
     print(f"Year {year}: Scaled Gen mean={x.mean().item():.6f}, std={x.std().item():.6f}")
-    return x.cpu()
+    return x.cpu(), {t: torch.stack(samples, dim=0)[:10] for t, samples in intermediate_samples.items()}
 
 def calculate_metrics(real_data, generated_data):
     metrics = {}
@@ -190,6 +177,54 @@ def calculate_metrics(real_data, generated_data):
     metrics['gen_kurt'] = stats.kurtosis(gen_data_np)
     
     return metrics
+
+def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, num_samples=10):
+    """Plot power spectrum comparison between real and generated sequences."""
+    plt.figure(figsize=(12, 8))
+    
+    # Compute power spectrum for real sequences
+    real_power = []
+    for seq in real_sequences[:num_samples]:
+        fft_result = np.fft.rfft(seq.numpy() - seq.numpy().mean())  # Remove mean
+        power = np.abs(fft_result) ** 2
+        real_power.append(power)
+    real_power = np.array(real_power)
+    mean_power = np.mean(real_power, axis=0)
+    quantiles = np.quantile(real_power, [0.25, 0.75], axis=0)
+    
+    # Normalize frequencies and power
+    freqs = np.linspace(0, 0.5, len(mean_power))
+    mean_power = mean_power / np.sum(mean_power)
+    quantiles = quantiles / np.sum(real_power, axis=1, keepdims=True).mean()
+    
+    # Plot real sequence power spectrum
+    plt.plot(freqs, 10 * np.log10(mean_power + 1e-10), color='black', label='Real Mean', linewidth=2)
+    plt.fill_between(freqs, 10 * np.log10(quantiles[0] + 1e-10), 10 * np.log10(quantiles[1] + 1e-10),
+                     color='gray', alpha=0.3, label='Real 25%-75% Quantile')
+
+    # Compute power spectrum for generated intermediate sequences
+    colors = plt.cm.Blues(np.linspace(0.3, 0.9, 5))
+    for i, (t, gen_seqs) in enumerate(gen_intermediate.items()):
+        gen_power = []
+        for seq in gen_seqs[:num_samples]:
+            fft_result = np.fft.rfft(seq.numpy() - seq.numpy().mean())
+            power = np.abs(fft_result) ** 2
+            gen_power.append(power)
+        gen_power = np.array(gen_power)
+        mean_gen_power = np.mean(gen_power, axis=0) / np.sum(gen_power)
+        plt.plot(freqs, 10 * np.log10(mean_gen_power + 1e-10), color=colors[i], label=f'Gen t={t}', linewidth=1.5)
+    
+    # Customize plot
+    plt.xlabel('Frequency (cycles/day)')
+    plt.ylabel('Power (dB)')
+    plt.ylim(-60, 0)  # Adjusted for log scale from 10^-6 to 10^-2
+    plt.xlim(0, 0.5)
+    plt.title('Power Spectrum Comparison: Real vs Generated Sequences')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
 
 def print_enhanced_report(metrics_dict, years):
     print("\n=== Validation Report ===")
@@ -269,16 +304,25 @@ def run_validation(config):
     all_gen_samples = []
     all_real_samples = []
     
+    # Sample real sequences for spectrogram baseline
+    real_sequences = []
+    for year in years:
+        year_idx = year - 2017
+        annual_date = annual_dates[year_idx].to(device)
+        real_seqs, _ = dataset.get_real_sequences_for_year(annual_date.cpu(), num_samples=10)
+        real_sequences.extend(real_seqs)
+    real_sequences = torch.stack(real_sequences)
+    
     for year in years:
         year_idx = year - 2017  # Compute index for annual_dates
         annual_date = annual_dates[year_idx].to(device)
         condition = {"date": annual_date.unsqueeze(0)}
-        real_sequences, _ = dataset.get_real_sequences_for_year(
+        real_sequences_year, _ = dataset.get_real_sequences_for_year(
             annual_date.cpu(), num_samples=num_groups_per_year)
         year_metrics_list = []
         year_gen_samples = []
         year_real_samples = []  # Initialize list
-        gen_data = generate_samples(
+        gen_data, gen_intermediate = generate_samples(
             model, diffusion, condition,
             num_samples=num_groups_per_year,
             device=device,
@@ -286,10 +330,10 @@ def run_validation(config):
         )
         # Inverse scale generated and real data
         gen_data = dataset.inverse_scale(gen_data)
-        real_sequences = dataset.inverse_scale(real_sequences)
+        real_sequences_year = dataset.inverse_scale(real_sequences_year)
         for group_idx in range(num_groups_per_year):
             group_data = gen_data[group_idx:group_idx+1]
-            real_data = real_sequences[group_idx].unsqueeze(0)
+            real_data = real_sequences_year[group_idx].unsqueeze(0)
             group_metrics = calculate_metrics(real_data, group_data)
             year_metrics_list.append(group_metrics)
             if group_idx < 3:
@@ -304,11 +348,18 @@ def run_validation(config):
     real_all_subset = torch.cat(all_real_samples, dim=0)
     metrics['global'] = calculate_metrics(real_all_subset, gen_all)
     print_enhanced_report(metrics, years)
+    
+    # Generate spectrogram comparison
+    output_dir = config["save_dir"]
+    os.makedirs(output_dir, exist_ok=True)
+    plot_spectrogram_comparison(real_sequences, gen_intermediate, 
+                               os.path.join(output_dir, 'spectrogram_comparison.png'))
+    print(f"\nSpectrogram comparison saved to {os.path.join(output_dir, 'spectrogram_comparison.png')}")
     print(f"\nValidation complete! Results saved to {config['save_dir']}")
 
 if __name__ == "__main__":
     config = {
-        "model_path": "saved_models/final_model.pth",
+        "model_path": "saved_models/model_epoch_500.pth",
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "validation_results",
         "channels": [32, 128, 256, 512, 1024, 2048]
