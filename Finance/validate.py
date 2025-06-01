@@ -196,7 +196,7 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
         gen_power = np.array(gen_power)
         mean_gen_power = np.mean(gen_power, axis=0) / np.sum(gen_power)
         print(mean_gen_power.shape)
-        plt.plot(freqs, 10 * np.log10(mean_gen_power + 1e-10), color=colors[i], label=f'Gen t={t}', linewidth=1.5)
+        plt.plot(freqs, 10 * np.log10(mean_gen_power.T + 1e-10), color=colors[i], label=f'Gen t={t}', linewidth=1.5)
     
     # Customize plot
     plt.xlabel('Frequency (cycles/day)')
