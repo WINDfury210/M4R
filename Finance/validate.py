@@ -203,7 +203,7 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
             gen_power = gen_power / np.sum(gen_power, axis=1, keepdims=True)  # Normalize
             mean_gen_power = np.mean(gen_power, axis=0)  # Shape: (129,)
             print(f"Timestep {t}: mean_gen_power shape = {mean_gen_power.shape}")
-            plt.plot(freqs, 10 * np.log10(mean_gen_power + 1e-10), color=colors[i], 
+            plt.plot(freqs, 10 * np.log10(mean_gen_power.T + 1e-10), color=colors[i], 
                      label=f'Gen t={t}', linewidth=1.5, alpha=0.7)
     
     # Customize plot
