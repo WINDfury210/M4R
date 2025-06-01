@@ -2,13 +2,11 @@ import json
 import os
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset
 from scipy import stats
 from statsmodels.tsa.stattools import acf
 import matplotlib.pyplot as plt
-from model import ConditionalUNet1D  # Import model
+from model import *
 
 # 1. Diffusion Process -------------------------------------------------------
 
@@ -362,7 +360,7 @@ if __name__ == "__main__":
         "model_path": "saved_models/model_epoch_500.pth",
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "validation_results",
-        "channels": [32, 128, 256, 512, 1024, 2048]
+        "channels": [32, 128, 512, 1024, 2048]
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     run_validation(config)

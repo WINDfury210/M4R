@@ -4,13 +4,11 @@ Train ConditionalUNet1D with MSE, ACF, Std, and Mean losses
 """
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-import numpy as np
 import os
 from scipy import stats
-from model import ConditionalUNet1D
+from model import *
 
 
 # 2. Diffusion Process -------------------------------------------------------
@@ -113,7 +111,7 @@ def ks_loss(pred, target):
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    diffusion = DiffusionProcess(num_timesteps=1000, device=device)
+    diffusion = DiffusionProcess(num_timesteps=config["num_timesteps"], device=device)
     dataset = FinancialDataset(config["data_path"], scale_factor=1.0)
     
     dataloader = DataLoader(
@@ -173,8 +171,9 @@ if __name__ == "__main__":
         "save_dir": "saved_models",
         "num_epochs": 1000,
         "batch_size": 64,  # Reduced from 64
-        "channels": [32, 64, 128, 512, 1024, 2048],
-        "lr": 1e-5,  # Reduced from 1e-6
+        "num_timesteps" : 1000,
+        "channels": [32, 128, 512, 2048],
+        "lr": 1e-4,  # Reduced from 1e-6
         "save_interval": 500
     }
     os.makedirs(config["save_dir"], exist_ok=True)
