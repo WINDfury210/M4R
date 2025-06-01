@@ -19,7 +19,6 @@ class DiffusionProcess:
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
-        self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas)
     
     def _linear_beta_schedule(self):
         return torch.linspace(1e-4, 0.02, self.num_timesteps)
@@ -37,11 +36,9 @@ class FinancialDataset(Dataset):
         data = torch.load(data_path)
         self.sequences = data["sequences"]
         self.dates = data["start_dates"]
-        # Store scaling parameters
         self.original_mean = self.sequences.mean().item()
         self.original_std = self.sequences.std().item()
         self.scale_factor = scale_factor
-        # Apply scaling
         self.sequences = (self.sequences - self.original_mean) / self.original_std * scale_factor
         print(f"Scaled data - Mean: {self.sequences.mean().item():.6f}, Std: {self.sequences.std().item():.6f}")
         
@@ -104,10 +101,10 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
     gen_intermediate = {}
     for t in intermediate_samples:
         if intermediate_samples[t]:
-            gen_intermediate[t] = torch.stack(intermediate_samples[t], dim=0)[:10]
+            gen_intermediate[t] = intermediate_samples[t][0][:num_samples]  # [num_samples, 256]
         else:
             print(f"Warning: No samples saved for t={t}")
-            gen_intermediate[t] = torch.zeros(10, num_samples, 256)  # Fallback
+            gen_intermediate[t] = torch.zeros(num_samples, 256)  # Fallback
     return x.cpu(), gen_intermediate
 
 def calculate_metrics(real_data, generated_data):
@@ -163,7 +160,7 @@ def calculate_metrics(real_data, generated_data):
 
 def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, num_samples=10):
     """Plot power spectrum comparison between real and generated sequences."""
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12, 6))
     
     # Compute power spectrum for real sequences
     real_power = []
@@ -171,7 +168,7 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
         fft_result = np.fft.rfft(seq.numpy() - seq.numpy().mean())  # Remove mean
         power = np.abs(fft_result) ** 2
         real_power.append(power)
-    real_power = np.array(real_power)
+    real_power = np.array(real_power)  # [num_samples, 129]
     mean_power = np.mean(real_power, axis=0)
     quantiles = np.quantile(real_power, [0.25, 0.75], axis=0)
     
@@ -189,18 +186,19 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
     colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(gen_intermediate)))
     for i, (t, gen_seqs) in enumerate(sorted(gen_intermediate.items())):
         gen_power = []
+        # gen_seqs: [num_samples, 256]
         for seq in gen_seqs[:num_samples]:
             fft_result = np.fft.rfft(seq.numpy() - seq.numpy().mean())
             power = np.abs(fft_result) ** 2
             gen_power.append(power)
-        gen_power = np.array(gen_power)
-        mean_gen_power = np.mean(gen_power, axis=0) / np.sum(gen_power)
-        plt.plot(freqs, 10 * np.log10(mean_gen_power + 1e-10), color=colors[i], label=f'Gen t={t}', linewidth=1.5)
+        gen_power = np.array(gen_power)  # [num_samples, 129]
+        mean_gen_power = np.mean(gen_power, axis=0) / np.sum(gen_power, axis=1, keepdims=True).mean()
+        plt.plot(freqs, 10 * np.log10(mean_gen_power + 1e-10), color=colors[i], label=f'Gen t={t}', linewidth=2)
     
     # Customize plot
     plt.xlabel('Frequency (cycles/day)')
     plt.ylabel('Power (dB)')
-    plt.ylim(-60, 0)
+    plt.ylim(-60, 30)
     plt.xlim(0, 0.5)
     plt.title('Power Spectrum Comparison: Real vs Generated Sequences')
     plt.legend()
@@ -219,10 +217,9 @@ def print_enhanced_report(metrics_dict, years):
     global_stats = metrics_dict['global']
     print(f"{'Mean':<12} {global_stats['real_mean']:>12.6f} {global_stats['gen_mean']:>12.6f}")
     print(f"{'Std Dev':<12} {global_stats['real_std']:>12.6f} {global_stats['gen_std']:>12.6f}")
-    print(f"{'Corr':<12} {global_stats['real_corr']:>12.6f} {global_stats['gen_corr']:>12.6f}")
+    print(f"{'Corr': {'real_mean':>12.6f} {global_stats['real_mean']:>12.6f} {global_stats['gen_mean']:>12.6f}}")
     print(f"{'Autocorr':<12} {global_stats['real_acf']:>12.6f} {global_stats['gen_acf']:>12.6f}")
     print(f"{'KS Stat':<12} {'-':>12} {global_stats['ks_stat']:>12.6f}")
-    print(f"{'Wass Dist':<12} {'-':>12} {global_stats['wass_dist']:>12.6f}")
     print(f"{'Shapiro P':<12} {'-':>12} {global_stats['shapiro_pval']:>12.6f}")
     print(f"{'Skew':<12} {global_stats['real_skew']:>12.6f} {global_stats['gen_skew']:>12.6f}")
     print(f"{'Kurtosis':<12} {global_stats['real_kurt']:>12.6f} {global_stats['gen_kurt']:>12.6f}")
@@ -343,9 +340,9 @@ def run_validation(config):
 if __name__ == "__main__":
     config = {
         "model_path": "saved_models/model_epoch_500.pth",
-        "data_path": "financial_data/sequences/sequences_256.pt",
+        "data_path": "financial_data/sequences/sequences_2017.pt",
         "save_dir": "validation_results",
-        "channels": [32, 64, 128, 512, 1024, 2048]
+        "channels": [32, 32, 64, 64, 128, 128]
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     run_validation(config)
