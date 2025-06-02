@@ -170,7 +170,7 @@ def train_model(config):
             optimizer.zero_grad(set_to_none=True)
             
             try:
-                with torch.amp.autocast(enabled=device.type == "cuda"):
+                with torch.amp.autocast('cuda',enabled=device.type == "cuda"):
                     pred_noise = model(noisy_x, t, dates)
                     mse_loss = F.mse_loss(pred_noise, noise)
                     # acf_loss_val = acf_loss(pred_noise, noise)
