@@ -223,7 +223,7 @@ if __name__ == "__main__":
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
         "num_epochs": 2000,
-        "batch_size": 32,  # Reduced from 64 to avoid OOM
+        "batch_size": 128,  # Reduced from 64 to avoid OOM
         "num_timesteps": 1000,
         "channels": [32, 128, 512, 2048],
         "lr": 1e-4,
