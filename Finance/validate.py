@@ -185,6 +185,8 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
     print(f"Real mean power sum: {np.sum(mean_real_power):.6f}")
     print(f"Real sequences std: {real_sequences.std():.6f}")
     
+    
+    gen_intermediate = {k:gen_intermediate[k] for k in [750, 1000] if k in gen_intermediate}
     # Plot real sequence power spectrum with shaded area and quantile lines
     plt.fill_between(freqs, 10 * np.log10(quantiles[0] + 1e-5), 10 * np.log10(quantiles[1] + 1e-5),
                      color='gray', alpha=0.1, label='Real 25%-75% Quantile')
@@ -353,7 +355,7 @@ def run_validation(config):
     # Generate spectrogram comparison
     output_dir = config["save_dir"]
     os.makedirs(output_dir, exist_ok=True)
-    plot_spectrogram_comparison(real_sequences, gen_intermediate[1000], 
+    plot_spectrogram_comparison(real_sequences, gen_intermediate, 
                                os.path.join(output_dir, 'spectrogram_comparison.png'))
     print(f"\nSpectrogram comparison saved to {os.path.join(output_dir, 'spectrogram_comparison.png')}")
     print(f"\nValidation complete! Results saved to {config['save_dir']}")
