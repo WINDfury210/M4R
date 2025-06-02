@@ -141,9 +141,9 @@ def train_model(config):
             # acf_loss_val = acf_loss(pred_noise, noise)
             # std_loss_val = std_loss(pred_noise, noise)
             # mean_loss_val = mean_loss(pred_noise, noise)
-            ks_loss_val = ks_loss(pred_noise, noise)
+            # ks_loss_val = ks_loss(pred_noise, noise)
             
-            loss = mse_loss + ks_loss_val  # Add KS loss with weight 0.5
+            loss = mse_loss # + ks_loss_val  # Add KS loss with weight 0.5
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -169,12 +169,12 @@ if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
-        "num_epochs": 1000,
+        "num_epochs": 2000,
         "batch_size": 64,  # Reduced from 64
         "num_timesteps" : 1000,
         "channels": [32, 128, 512, 2048],
         "lr": 1e-4,  # Reduced from 1e-6
-        "save_interval": 500
+        "save_interval": 200
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     train_model(config)
