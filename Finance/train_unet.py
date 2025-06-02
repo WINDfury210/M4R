@@ -126,7 +126,7 @@ def train_model(config):
     
     # Load checkpoint
     start_epoch = 0
-    checkpoint_files = sorted(glob(os.path.join(config["save_dir"], "model_epoch_*.pth")))
+    checkpoint_files = sorted(glob(os.path.join(config["save_dir"], "model2_epoch_*.pth")))
     if checkpoint_files:
         latest_checkpoint = checkpoint_files[-1]
         checkpoint = torch.load(latest_checkpoint, map_location=device)
@@ -141,7 +141,7 @@ def train_model(config):
     # Manage checkpoints to save space
     max_checkpoints = 2
     def clean_old_checkpoints():
-        checkpoints = sorted(glob(os.path.join(config["save_dir"], "model_epoch_*.pth")))
+        checkpoints = sorted(glob(os.path.join(config["save_dir"], "model2_epoch_*.pth")))
         if len(checkpoints) > max_checkpoints:
             for old_checkpoint in checkpoints[:-max_checkpoints]:
                 os.remove(old_checkpoint)
@@ -209,8 +209,8 @@ def train_model(config):
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-            }, os.path.join(config["save_dir"], f"model_epoch_{epoch+1}.pth"))
-            print(f"Saved checkpoint: {os.path.join(config['save_dir'], f'model_epoch_{epoch+1}.pth')}")
+            }, os.path.join(config["save_dir"], f"model2_epoch_{epoch+1}.pth"))
+            print(f"Saved checkpoint: {os.path.join(config['save_dir'], f'model2_epoch_{epoch+1}.pth')}")
             clean_old_checkpoints()
     
     torch.save(model.state_dict(), os.path.join(config["save_dir"], "final_model.pth"))
