@@ -80,7 +80,7 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
     labels = condition["date"].repeat(num_samples, 1).to(device)
     year = int(condition["date"][0, 0].item() * (2024 - 2017) + 2017)
     x = torch.randn(num_samples, 256, device=device)
-    intermediate_samples = {100: [], 300: [], 500: [], 700: [], 900: []}
+    intermediate_samples = {250: [], 500: [], 750: [], 1000: []}
     # Adjust step_indices to match num_timesteps
     step_indices = torch.linspace(diffusion.num_timesteps - 1, 0, steps, dtype=torch.long, device=device)
     for i in range(steps):
@@ -95,7 +95,7 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
         if t > 0:
             x = x + torch.sqrt(beta_t) * torch.randn_like(x)
         # Save intermediate samples at specific timesteps
-        target_ts = [100, 300, 500, 700, 900]
+        target_ts = [250, 500, 750, 1000]
         if int(t) in target_ts:
             intermediate_samples[int(t)].append(x.cpu())
             
@@ -353,7 +353,7 @@ def run_validation(config):
     # Generate spectrogram comparison
     output_dir = config["save_dir"]
     os.makedirs(output_dir, exist_ok=True)
-    plot_spectrogram_comparison(real_sequences, gen_intermediate, 
+    plot_spectrogram_comparison(real_sequences, gen_intermediate[1000], 
                                os.path.join(output_dir, 'spectrogram_comparison.png'))
     print(f"\nSpectrogram comparison saved to {os.path.join(output_dir, 'spectrogram_comparison.png')}")
     print(f"\nValidation complete! Results saved to {config['save_dir']}")
