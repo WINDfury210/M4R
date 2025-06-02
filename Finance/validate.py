@@ -97,7 +97,7 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
         # Save intermediate samples at specific timesteps
         target_ts = [250, 500, 750, 1000]
         if int(t+1) in target_ts:
-            intermediate_samples[int(t)].append(x.cpu())
+            intermediate_samples[int(t+1)].append(x.cpu())
             
     # Stack intermediate samples, handle empty cases
     gen_intermediate = {}
