@@ -122,7 +122,7 @@ def train_model(config):
     
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["num_epochs"])
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
+    scaler = torch.amp.GradScaler('cuda', enabled=device.type == "cuda")
     
     # Load checkpoint
     start_epoch = 0
