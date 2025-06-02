@@ -96,7 +96,7 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
             x = x + torch.sqrt(beta_t) * torch.randn_like(x)
         # Save intermediate samples at specific timesteps
         target_ts = [250, 500, 750, 1000]
-        if int(t) in target_ts:
+        if int(t+1) in target_ts:
             intermediate_samples[int(t)].append(x.cpu())
             
     # Stack intermediate samples, handle empty cases
