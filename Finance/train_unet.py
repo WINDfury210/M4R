@@ -1,20 +1,17 @@
-"""
-Diffusion Model Training Script
-Train ConditionalUNet1D with MSE, ACF, Std, and Mean losses
-"""
-
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import os
+from glob import glob
 from scipy import stats
-from model import *
-
+from model import ConditionalUNet1D
+from tqdm import tqdm
+import time
 
 # 2. Diffusion Process -------------------------------------------------------
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=2000, device="cpu"):
+    def __init__(self, num_timesteps=1000, device="cpu"):
         self.num_timesteps = num_timesteps
         self.device = device
         self.betas = self._linear_beta_schedule().to(device)
@@ -35,11 +32,13 @@ class DiffusionProcess:
 # 3. Data Loading ------------------------------------------------------------
 
 class FinancialDataset(Dataset):
-    def __init__(self, data_path, scale_factor=1.0):
-        data = torch.load(data_path)
+    def __init__(self, data_path, scale_factor=1.0, preload=True):
+        data = torch.load(data_path, map_location='cpu')
         self.sequences = data["sequences"]
         self.dates = data["start_dates"]
-        # Scale data
+        if preload:
+            self.sequences = self.sequences.to('cpu', non_blocking=True)
+            self.dates = self.dates.to('cpu', non_blocking=True)
         self.original_mean = self.sequences.mean().item()
         self.original_std = self.sequences.std().item()
         self.scale_factor = scale_factor
@@ -72,7 +71,6 @@ class FinancialDataset(Dataset):
 # 4. Loss Functions -----------------------------------------------------------
 
 def acf_loss(pred, target):
-    """Compute MSE loss between ACF of predictions and target using FFT."""
     pred = pred - pred.mean(dim=-1, keepdim=True)
     target = target - target.mean(dim=-1, keepdim=True)
     pred_fft = torch.fft.rfft(pred, dim=-1)
@@ -84,19 +82,16 @@ def acf_loss(pred, target):
     return F.mse_loss(pred_acf, target_acf)
 
 def std_loss(pred, target):
-    """Compute MSE loss between standard deviations of predictions and target."""
     pred_std = pred.std(dim=-1)
     target_std = target.std(dim=-1)
     return F.mse_loss(pred_std, target_std)
 
 def mean_loss(pred, target):
-    """Compute MSE loss between means of predictions and target."""
     pred_mean = pred.mean(dim=-1)
     target_mean = target.mean(dim=-1)
     return F.mse_loss(pred_mean, target_mean)
 
 def ks_loss(pred, target):
-    """Compute KS statistic loss between predictions and target."""
     batch_size = pred.size(0)
     losses = []
     for i in range(batch_size):
@@ -110,58 +105,116 @@ def ks_loss(pred, target):
 
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}, GPU: {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'None'}")
+    
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
     diffusion = DiffusionProcess(num_timesteps=config["num_timesteps"], device=device)
-    dataset = FinancialDataset(config["data_path"], scale_factor=1.0)
+    dataset = FinancialDataset(config["data_path"], scale_factor=1.0, preload=True)
     
     dataloader = DataLoader(
         dataset,
         batch_size=config["batch_size"],
         shuffle=True,
-        num_workers=4
+        num_workers=config.get("num_workers", 4),
+        pin_memory=True,
+        persistent_workers=True
     )
     
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["num_epochs"])
+    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
     
-    for epoch in range(config["num_epochs"]):
+    # Load checkpoint
+    start_epoch = 0
+    checkpoint_files = sorted(glob(os.path.join(config["save_dir"], "model_epoch_*.pth")))
+    if checkpoint_files:
+        latest_checkpoint = checkpoint_files[-1]
+        checkpoint = torch.load(latest_checkpoint, map_location=device)
+        try:
+            model.load_state_dict(checkpoint["model_state_dict"])
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            start_epoch = checkpoint["epoch"] + 1
+            print(f"Resumed from checkpoint: {latest_checkpoint}, starting at epoch {start_epoch}")
+        except Exception as e:
+            print(f"Checkpoint loading failed: {e}, starting from scratch")
+    
+    # Manage checkpoints to save space
+    max_checkpoints = 2
+    def clean_old_checkpoints():
+        checkpoints = sorted(glob(os.path.join(config["save_dir"], "model_epoch_*.pth")))
+        if len(checkpoints) > max_checkpoints:
+            for old_checkpoint in checkpoints[:-max_checkpoints]:
+                os.remove(old_checkpoint)
+                print(f"Removed old checkpoint: {old_checkpoint}")
+    
+    for epoch in range(start_epoch, config["num_epochs"]):
         model.train()
         total_loss = 0
-        for batch in dataloader:
-            sequences = batch["sequence"].to(device)
-            dates = batch["date"].to(device)
+        num_batches = len(dataloader)
+        
+        progress_bar = tqdm(
+            dataloader,
+            desc=f"Epoch {epoch+1}/{config['num_epochs']}, Loss: 0.000000",
+            total=num_batches,
+            leave=True,
+            mininterval=1.0
+        )
+        
+        for batch in progress_bar:
+            sequences = batch["sequence"].to(device, non_blocking=True)
+            dates = batch["date"].to(device, non_blocking=True)
             
             t = torch.randint(0, diffusion.num_timesteps, (sequences.size(0),), device=device)
             noisy_x, noise = diffusion.add_noise(sequences, t)
             
-            optimizer.zero_grad()
-            pred_noise = model(noisy_x, t, dates)
+            optimizer.zero_grad(set_to_none=True)
             
-            mse_loss = F.mse_loss(pred_noise, noise)
-            # acf_loss_val = acf_loss(pred_noise, noise)
-            # std_loss_val = std_loss(pred_noise, noise)
-            # mean_loss_val = mean_loss(pred_noise, noise)
-            # ks_loss_val = ks_loss(pred_noise, noise)
+            try:
+                with torch.amp.autocast(enabled=device.type == "cuda"):
+                    pred_noise = model(noisy_x, t, dates)
+                    mse_loss = F.mse_loss(pred_noise, noise)
+                    # acf_loss_val = acf_loss(pred_noise, noise)
+                    # std_loss_val = std_loss(pred_noise, noise)
+                    # mean_loss_val = mean_loss(pred_noise, noise)
+                    # ks_loss_val = ks_loss(pred_noise, noise)
+                    loss = mse_loss  # + 0.1 * std_loss_val  # Uncomment to enable std_loss
+                
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                
+                total_loss += loss.item()
+                
+                avg_loss = total_loss / (progress_bar.n + 1)
+                progress_bar.set_description(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}")
             
-            loss = mse_loss # + ks_loss_val  # Add KS loss with weight 0.5
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            
-            total_loss += loss.item()
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    print(f"OOM at batch_size={config['batch_size']}, reducing to {config['batch_size']//2}")
+                    config["batch_size"] //= 2
+                    if config["batch_size"] < 8:
+                        raise RuntimeError("Batch size too small, stopping training")
+                    torch.cuda.empty_cache()
+                    return train_model(config)  # Retry with smaller batch_size
+                else:
+                    raise e
         
+        progress_bar.close()
         scheduler.step()
-        avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1}/{config['num_epochs']}, Loss: {avg_loss:.6f}, ")
         
-        if (epoch + 1) % config["save_interval"] == 0:
+        if (epoch + 1) % config["save_interval"] == 0 or epoch == config["num_epochs"] - 1:
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, os.path.join(config["save_dir"], f"model_epoch_{epoch+1}.pth"))
+            print(f"Saved checkpoint: {os.path.join(config['save_dir'], f'model_epoch_{epoch+1}.pth')}")
+            clean_old_checkpoints()
     
     torch.save(model.state_dict(), os.path.join(config["save_dir"], "final_model.pth"))
+    print(f"Saved final model: {os.path.join(config['save_dir'], 'final_model.pth')}")
 
 # 6. Main --------------------------------------------------------------------
 
@@ -170,11 +223,12 @@ if __name__ == "__main__":
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
         "num_epochs": 2000,
-        "batch_size": 64,  # Reduced from 64
-        "num_timesteps" : 1000,
+        "batch_size": 32,  # Reduced from 64 to avoid OOM
+        "num_timesteps": 1000,
         "channels": [32, 128, 512, 2048],
-        "lr": 1e-4,  # Reduced from 1e-6
-        "save_interval": 200
+        "lr": 1e-4,
+        "save_interval": 50,  # More frequent for network interruptions
+        "num_workers": 8  # Increased for faster data loading
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     train_model(config)
