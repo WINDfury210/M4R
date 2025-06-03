@@ -141,10 +141,6 @@ def calculate_metrics(real_data, generated_data):
     metrics['real_acf'] = real_acf
     metrics['gen_acf'] = gen_acf
     
-    # KS Statistic
-    ks_stat, _ = stats.ks_2samp(real_data_np, gen_data_np)
-    metrics['ks_stat'] = ks_stat
-    
     # Wasserstein Distance
     wass_dist = stats.wasserstein_distance(real_data_np, gen_data_np)
     metrics['wass_dist'] = wass_dist
@@ -158,6 +154,38 @@ def calculate_metrics(real_data, generated_data):
     metrics['gen_skew'] = stats.skew(gen_data_np)
     metrics['real_kurt'] = stats.kurtosis(real_data_np)
     metrics['gen_kurt'] = stats.kurtosis(gen_data_np)
+    
+    # Compute metrics for absolute values
+    abs_real_data = torch.abs(real_data)
+    abs_gen_data = torch.abs(generated_data)
+    abs_real_data_np = abs_real_data.cpu().numpy().flatten()
+    abs_gen_data_np = abs_gen_data.cpu().numpy().flatten()
+    
+    metrics['abs_real_mean'] = abs_real_data.mean().item()
+    metrics['abs_gen_mean'] = abs_gen_data.mean().item()
+    metrics['abs_real_std'] = abs_real_data.std().item()
+    metrics['abs_gen_std'] = abs_gen_data.std().item()
+    
+    abs_real_lagged = abs_real_data_np[:-1]
+    abs_real_next = abs_real_data_np[1:]
+    abs_gen_lagged = abs_gen_data_np[:-1]
+    abs_gen_next = abs_gen_data_np[1:]
+    metrics['abs_real_corr'] = np.corrcoef(abs_real_lagged, abs_real_next)[0, 1] if len(abs_real_lagged) > 1 else 0.0
+    metrics['abs_gen_corr'] = np.corrcoef(abs_gen_lagged, abs_gen_next)[0, 1] if len(abs_gen_lagged) > 1 else 0.0
+    
+    abs_real_acf = acf(abs_real_data_np, nlags=20, fft=True)[1:].mean()
+    abs_gen_acf = acf(abs_gen_data_np, nlags=20, fft=True)[1:].mean()
+    metrics['abs_real_acf'] = abs_real_acf
+    metrics['abs_gen_acf'] = abs_gen_acf
+    
+    abs_wass_dist = stats.wasserstein_distance(abs_real_data_np, abs_gen_data_np)
+    metrics['abs_wass_dist'] = abs_wass_dist
+    
+    metrics['abs_gen_shapiro_pval'] = stats.shapiro(abs_gen_data_np[:5000])[1]
+    metrics['abs_real_skew'] = stats.skew(abs_real_data_np)
+    metrics['abs_gen_skew'] = stats.skew(abs_gen_data_np)
+    metrics['abs_real_kurt'] = stats.kurtosis(abs_real_data_np)
+    metrics['abs_gen_kurt'] = stats.kurtosis(abs_gen_data_np)
     
     return metrics
 
@@ -185,8 +213,7 @@ def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, n
     print(f"Real mean power sum: {np.sum(mean_real_power):.6f}")
     print(f"Real sequences std: {real_sequences.std():.6f}")
     
-    
-    gen_intermediate = {k:gen_intermediate[k] for k in [750, 1000] if k in gen_intermediate}
+    gen_intermediate = {k: gen_intermediate[k] for k in [750, 1000] if k in gen_intermediate}
     # Plot real sequence power spectrum with shaded area and quantile lines
     plt.fill_between(freqs, 10 * np.log10(quantiles[0] + 1e-5), 10 * np.log10(quantiles[1] + 1e-5),
                      color='gray', alpha=0.1, label='Real 25%-75% Quantile')
@@ -241,50 +268,90 @@ def print_enhanced_report(metrics_dict, years):
     print(f"{'Std Dev':<12} {global_stats['real_std']:>12.6f} {global_stats['gen_std']:>12.6f}")
     print(f"{'Corr':<12} {global_stats['real_corr']:>12.6f} {global_stats['gen_corr']:>12.6f}")
     print(f"{'Autocorr':<12} {global_stats['real_acf']:>12.6f} {global_stats['gen_acf']:>12.6f}")
-    print(f"{'KS Stat':<12} {'-':>12} {global_stats['ks_stat']:>12.6f}")
     print(f"{'Wass Dist':<12} {'-':>12} {global_stats['wass_dist']:>12.6f}")
     print(f"{'Shapiro P':<12} {'-':>12} {global_stats['shapiro_pval']:>12.6f}")
     print(f"{'Skew':<12} {global_stats['real_skew']:>12.6f} {global_stats['gen_skew']:>12.6f}")
     print(f"{'Kurtosis':<12} {global_stats['real_kurt']:>12.6f} {global_stats['gen_kurt']:>12.6f}")
     
-    # Per-sample statistics (first 3 samples per year)
-    print("\n[Per-Sample Statistics]")
-    print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
-    print("-" * 50)
-    for year in years:
-        for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
-            for metric in ['mean', 'std', 'corr', 'acf', 'ks_stat', 'wass_dist', 'skew', 'kurt']:
-                if metric in ['ks_stat', 'wass_dist', 'shapiro_pval']:
-                    real_val = '-'
-                    gen_val = f"{sample_metrics[metric]:.6f}"
-                else:
-                    real_key = f'real_{metric}'
-                    gen_key = f'gen_{metric}'
-                    real_val = f"{sample_metrics[real_key]:.6f}"
-                    gen_val = f"{sample_metrics[gen_key]:.6f}"
-                print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
+    # Absolute Value Global Statistics
+    print("\n[Absolute Value Global Statistics]")
+    print(f"{'Metric':<12} {'Real':>12} {'Generated':>12}")
+    print("-" * 36)
+    print(f"{'Mean':<12} {global_stats['abs_real_mean']:>12.6f} {global_stats['abs_gen_mean']:>12.6f}")
+    print(f"{'Std Dev':<12} {global_stats['abs_real_std']:>12.6f} {global_stats['abs_gen_std']:>12.6f}")
+    print(f"{'Corr':<12} {global_stats['abs_real_corr']:>12.6f} {global_stats['abs_gen_corr']:>12.6f}")
+    print(f"{'Autocorr':<12} {global_stats['abs_real_acf']:>12.6f} {global_stats['abs_gen_acf']:>12.6f}")
+    print(f"{'Wass Dist':<12} {'-':>12} {global_stats['abs_wass_dist']:>12.6f}")
+    print(f"{'Shapiro P':<12} {'-':>12} {global_stats['abs_gen_shapiro_pval']:>12.6f}")
+    print(f"{'Skew':<12} {global_stats['abs_real_skew']:>12.6f} {global_stats['abs_gen_skew']:>12.6f}")
+    print(f"{'Kurtosis':<12} {global_stats['abs_real_kurt']:>12.6f} {global_stats['abs_gen_kurt']:>12.6f}")
+    
+    # # Per-sample statistics (first 3 samples per year)
+    # print("\n[Per-Sample Statistics]")
+    # print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
+    # print("-" * 50)
+    # for year in years:
+    #     for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
+    #         for metric in ['mean', 'std', 'corr', 'acf', 'wass_dist', 'skew', 'kurt']:
+    #             if metric in ['wass_dist', 'shapiro_pval']:
+    #                 real_val = '-'
+    #                 gen_val = f"{sample_metrics[metric]:.6f}"
+    #             else:
+    #                 real_key = f'real_{metric}'
+    #                 gen_key = f'gen_{metric}'
+    #                 real_val = f"{sample_metrics[real_key]:.6f}"
+    #                 gen_val = f"{sample_metrics[gen_key]:.6f}"
+    #             print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
+    
+    # # Absolute Value Per-Sample Statistics
+    # print("\n[Absolute Value Per-Sample Statistics]")
+    # print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
+    # print("-" * 50)
+    # for year in years:
+    #     for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
+    #         for metric in ['mean', 'std', 'corr', 'acf', 'wass_dist', 'skew', 'kurt']:
+    #             if metric in ['wass_dist', 'shapiro_pval']:
+    #                 real_val = '-'
+    #                 gen_val = f"{sample_metrics[f'abs_{metric}']:.6f}"
+    #             else:
+    #                 real_key = f'abs_real_{metric}'
+    #                 gen_key = f'abs_gen_{metric}'
+    #                 real_val = f"{sample_metrics[real_key]:.6f}"
+    #                 gen_val = f"{sample_metrics[gen_key]:.6f}"
+    #             print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
 
 def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, f'metrics_{year}.json'), 'w') as f:
         json.dump(metrics, f, indent=2)
-    plt.figure(figsize=(15, 10))
-    for i in range(min(3, len(real_samples))):
-        # Time series plots
-        plt.subplot(3, 3, i+1)
-        plt.plot(real_samples[i].numpy(), label="Real")
-        plt.title(f"Real Sample {i+1} (Year {year})")
-        plt.legend()
-        plt.subplot(3, 3, i+4)
+    
+    # Main figure: Time series and Autocovariance
+    plt.figure(figsize=(10, 10))
+    for i in range(min(3, len(gen_samples))):
+        # Generated time series plots (first column)
+        plt.subplot(3, 2, 2*i + 1)
         plt.plot(gen_samples[i].numpy(), label="Generated")
         plt.title(f"Generated Sample {i+1} (Year {year})")
         plt.legend()
-        # Q-Q Plot
-        plt.subplot(3, 3, i+7)
-        stats.probplot(gen_samples[i].numpy(), dist="norm", plot=plt)
-        plt.title(f"Q-Q Plot Gen Sample {i+1}")
+        # Autocovariance plot (second column)
+        plt.subplot(3, 2, 2*i + 2)
+        gen_acf = acf(gen_samples[i].numpy(), nlags=20, fft=True)
+        plt.stem(range(len(gen_acf)), gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
+        plt.title(f"Autocovariance Gen Sample {i+1}")
+        plt.xlabel('Lag')
+        plt.ylabel('Autocovariance')
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'year_{year}_samples.png'))
+    plt.close()
+    
+    # Separate figure: Q-Q Plots
+    plt.figure(figsize=(10, 10))
+    for i in range(min(3, len(gen_samples))):
+        plt.subplot(3, 1, i + 1)
+        stats.probplot(gen_samples[i].numpy(), dist="norm", plot=plt)
+        plt.title(f"Q-Q Plot Gen Sample {i+1} (Year {year})")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'year_{year}_qq_plots.png'))
     plt.close()
 
 # 5. Main Validation Function ------------------------------------------------
@@ -315,6 +382,7 @@ def run_validation(config):
         real_seqs, _ = dataset.get_real_sequences_for_year(annual_date.cpu(), num_samples=10)
         real_sequences.extend(real_seqs)
     real_sequences = torch.stack(real_sequences)
+    real_sequences = dataset.inverse_scale(real_sequences)  # Ensure real sequences are in original scale
     
     for year in years:
         year_idx = year - 2017  # Compute index for annual_dates
