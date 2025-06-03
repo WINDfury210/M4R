@@ -222,7 +222,7 @@ if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "saved_models",
-        "num_epochs": 2000,
+        "num_epochs": 4000,
         "batch_size": 128,  # Reduced from 64 to avoid OOM
         "num_timesteps": 1000,
         "channels": [32, 128, 512, 2048],

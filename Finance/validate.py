@@ -286,58 +286,71 @@ def print_enhanced_report(metrics_dict, years):
     print(f"{'Skew':<12} {global_stats['abs_real_skew']:>12.6f} {global_stats['abs_gen_skew']:>12.6f}")
     print(f"{'Kurtosis':<12} {global_stats['abs_real_kurt']:>12.6f} {global_stats['abs_gen_kurt']:>12.6f}")
     
-    # # Per-sample statistics (first 3 samples per year)
-    # print("\n[Per-Sample Statistics]")
-    # print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
-    # print("-" * 50)
-    # for year in years:
-    #     for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
-    #         for metric in ['mean', 'std', 'corr', 'acf', 'wass_dist', 'skew', 'kurt']:
-    #             if metric in ['wass_dist', 'shapiro_pval']:
-    #                 real_val = '-'
-    #                 gen_val = f"{sample_metrics[metric]:.6f}"
-    #             else:
-    #                 real_key = f'real_{metric}'
-    #                 gen_key = f'gen_{metric}'
-    #                 real_val = f"{sample_metrics[real_key]:.6f}"
-    #                 gen_val = f"{sample_metrics[gen_key]:.6f}"
-    #             print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
+    # Per-sample statistics (first 3 samples per year)
+    print("\n[Per-Sample Statistics]")
+    print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
+    print("-" * 50)
+    for year in years:
+        for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
+            for metric in ['mean', 'std', 'corr', 'acf', 'wass_dist', 'skew', 'kurt']:
+                if metric in ['wass_dist', 'shapiro_pval']:
+                    real_val = '-'
+                    gen_val = f"{sample_metrics[metric]:.6f}"
+                else:
+                    real_key = f'real_{metric}'
+                    gen_key = f'gen_{metric}'
+                    real_val = f"{sample_metrics[real_key]:.6f}"
+                    gen_val = f"{sample_metrics[gen_key]:.6f}"
+                print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
     
-    # # Absolute Value Per-Sample Statistics
-    # print("\n[Absolute Value Per-Sample Statistics]")
-    # print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
-    # print("-" * 50)
-    # for year in years:
-    #     for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
-    #         for metric in ['mean', 'std', 'corr', 'acf', 'wass_dist', 'skew', 'kurt']:
-    #             if metric in ['wass_dist', 'shapiro_pval']:
-    #                 real_val = '-'
-    #                 gen_val = f"{sample_metrics[f'abs_{metric}']:.6f}"
-    #             else:
-    #                 real_key = f'abs_real_{metric}'
-    #                 gen_key = f'abs_gen_{metric}'
-    #                 real_val = f"{sample_metrics[real_key]:.6f}"
-    #                 gen_val = f"{sample_metrics[gen_key]:.6f}"
-    #             print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
+    # Absolute Value Per-Sample Statistics
+    print("\n[Absolute Value Per-Sample Statistics]")
+    print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
+    print("-" * 50)
+    for year in years:
+        for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
+            for metric in ['mean', 'std', 'corr', 'acf', 'wass_dist', 'skew', 'kurt']:
+                if metric in ['wass_dist', 'shapiro_pval']:
+                    real_val = '-'
+                    gen_val = f"{sample_metrics[f'abs_{metric}']:.6f}"
+                else:
+                    real_key = f'abs_real_{metric}'
+                    gen_key = f'abs_gen_{metric}'
+                    real_val = f"{sample_metrics[real_key]:.6f}"
+                    gen_val = f"{sample_metrics[gen_key]:.6f}"
+                print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
 
 def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, f'metrics_{year}.json'), 'w') as f:
         json.dump(metrics, f, indent=2)
     
-    # Main figure: Time series and Autocovariance
-    plt.figure(figsize=(10, 10))
+    # Main figure: Time series and Autocovariance for original and absolute values
+    plt.figure(figsize=(12, 12))
     for i in range(min(3, len(gen_samples))):
-        # Generated time series plots (first column)
-        plt.subplot(3, 2, 2*i + 1)
+        # Original Generated time series plots (first column, rows 1-3)
+        plt.subplot(6, 2, 2*i + 1)
         plt.plot(gen_samples[i].numpy(), label="Generated")
-        plt.title(f"Generated Sample {i+1} (Year {year})")
+        plt.title(f"Gen Sample {i+1} (Year {year})")
         plt.legend()
-        # Autocovariance plot (second column)
-        plt.subplot(3, 2, 2*i + 2)
+        # Original Autocovariance plot (second column, rows 1-3)
+        plt.subplot(6, 2, 2*i + 2)
         gen_acf = acf(gen_samples[i].numpy(), nlags=20, fft=True)
         plt.stem(range(len(gen_acf)), gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
-        plt.title(f"Autocovariance Gen Sample {i+1}")
+        plt.title(f"Autocov Gen Sample {i+1}")
+        plt.xlabel('Lag')
+        plt.ylabel('Autocovariance')
+        
+        # Absolute Generated time series plots (first column, rows 4-6)
+        plt.subplot(6, 2, 2*i + 7)
+        plt.plot(np.abs(gen_samples[i].numpy()), label="Abs Generated")
+        plt.title(f"Abs Gen Sample {i+1} (Year {year})")
+        plt.legend()
+        # Absolute Autocovariance plot (second column, rows 4-6)
+        plt.subplot(6, 2, 2*i + 8)
+        abs_gen_acf = acf(np.abs(gen_samples[i].numpy()), nlags=20, fft=True)
+        plt.stem(range(len(abs_gen_acf)), abs_gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
+        plt.title(f"Autocov Abs Gen Sample {i+1}")
         plt.xlabel('Lag')
         plt.ylabel('Autocovariance')
     plt.tight_layout()
@@ -345,10 +358,11 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     plt.close()
     
     # Separate figure: Q-Q Plots
-    plt.figure(figsize=(10, 10))
+    plt.figure(figsize=(10, 15))
     for i in range(min(3, len(gen_samples))):
         plt.subplot(3, 1, i + 1)
         stats.probplot(gen_samples[i].numpy(), dist="norm", plot=plt)
+        plt.axis('equal')  # Ensure square aspect ratio
         plt.title(f"Q-Q Plot Gen Sample {i+1} (Year {year})")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'year_{year}_qq_plots.png'))
