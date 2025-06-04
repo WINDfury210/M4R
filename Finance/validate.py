@@ -444,7 +444,7 @@ def run_validation(config):
 
 if __name__ == "__main__":
     config = {
-        "model_path": "saved_models/model_epoch_500.pth",
+        "model_path": "saved_models/final_model.pth",
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "validation_results",
         "channels": [32, 128, 512, 2048]
