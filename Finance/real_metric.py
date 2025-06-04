@@ -243,6 +243,6 @@ if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "real_metrics",
-        "max_samples": 100
+        "max_samples": 10000
     }
     compute_real_metrics(config)
