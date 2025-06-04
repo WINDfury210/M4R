@@ -31,20 +31,35 @@ class FinancialDataset(Dataset):
     def get_all_sequences_for_year(self, year, max_samples=100):
         min_year, max_year = 2017, 2024
         norm_year = (year - min_year) / (max_year - min_year)
-        year_mask = torch.abs(self.dates[:, 0] - norm_year) < 1e-5
+        year_mask = torch.abs(self.dates[:, 0] - norm_year) < 1e-3  # Relaxed tolerance
         year_indices = torch.where(year_mask)[0]
+        print(f"Year {year}: Found {len(year_indices)} sequences")
+        if len(year_indices) == 0:
+            print(f"Warning: No sequences found for year {year}")
+            return torch.zeros(0, 256), torch.tensor([])
         if len(year_indices) > max_samples:
             random_indices = torch.randperm(len(year_indices))[:max_samples]
             year_indices = year_indices[random_indices]
         return self.sequences[year_indices], year_indices
     
     def inverse_scale(self, sequences):
+        if sequences.numel() == 0:
+            return sequences
         return sequences * self.original_std / self.scale_factor + self.original_mean
 
 # 2. Metrics Calculation -----------------------------------------------------
 
 def calculate_metrics(real_data):
     metrics = {}
+    
+    if real_data.numel() == 0 or real_data.dim() == 0:
+        print("Warning: Empty or invalid real_data, returning default metrics")
+        return {
+            'real_mean': 0.0, 'real_std': 0.0, 'real_corr': 0.0, 'real_acf': 0.0,
+            'real_skew': 0.0, 'real_kurt': 0.0,
+            'abs_real_mean': 0.0, 'abs_real_std': 0.0, 'abs_real_corr': 0.0, 'abs_real_acf': 0.0,
+            'abs_real_skew': 0.0, 'abs_real_kurt': 0.0
+        }
     
     if real_data.dim() == 1:
         real_data = real_data.unsqueeze(0)
@@ -58,7 +73,11 @@ def calculate_metrics(real_data):
     real_next = real_data_np[1:]
     metrics['real_corr'] = np.corrcoef(real_lagged, real_next)[0, 1] if len(real_lagged) > 1 else 0.0
     
-    real_acf = acf(real_data_np, nlags=20, fft=True)[1:].mean()
+    try:
+        real_acf = acf(real_data_np, nlags=20, fft=True)[1:].mean()
+    except Exception as e:
+        print(f"Warning: ACF computation failed, setting real_acf to 0.0: {e}")
+        real_acf = 0.0
     metrics['real_acf'] = real_acf
     
     metrics['real_skew'] = stats.skew(real_data_np)
@@ -75,7 +94,11 @@ def calculate_metrics(real_data):
     abs_real_next = abs_real_data_np[1:]
     metrics['abs_real_corr'] = np.corrcoef(abs_real_lagged, abs_real_next)[0, 1] if len(abs_real_lagged) > 1 else 0.0
     
-    abs_real_acf = acf(abs_real_data_np, nlags=20, fft=True)[1:].mean()
+    try:
+        abs_real_acf = acf(abs_real_data_np, nlags=20, fft=True)[1:].mean()
+    except Exception as e:
+        print(f"Warning: ACF computation failed for abs, setting abs_real_acf to 0.0: {e}")
+        abs_real_acf = 0.0
     metrics['abs_real_acf'] = abs_real_acf
     
     metrics['abs_real_skew'] = stats.skew(abs_real_data_np)
@@ -85,15 +108,30 @@ def calculate_metrics(real_data):
 
 def compute_stats(metrics_list):
     if not metrics_list:
-        return {}
+        print("Warning: Empty metrics_list, returning default stats")
+        return {
+            'real_mean': {'mean': 0.0, 'variance': 0.0},
+            'real_std': {'mean': 0.0, 'variance': 0.0},
+            'real_corr': {'mean': 0.0, 'variance': 0.0},
+            'real_acf': {'mean': 0.0, 'variance': 0.0},
+            'real_skew': {'mean': 0.0, 'variance': 0.0},
+            'real_kurt': {'mean': 0.0, 'variance': 0.0},
+            'abs_real_mean': {'mean': 0.0, 'variance': 0.0},
+            'abs_real_std': {'mean': 0.0, 'variance': 0.0},
+            'abs_real_corr': {'mean': 0.0, 'variance': 0.0},
+            'abs_real_acf': {'mean': 0.0, 'variance': 0.0},
+            'abs_real_skew': {'mean': 0.0, 'variance': 0.0},
+            'abs_real_kurt': {'mean': 0.0, 'variance': 0.0}
+        }
+    
     stats = {}
     keys = metrics_list[0].keys()
     for key in keys:
         values = [m[key] for m in metrics_list if key in m]
         if values:
             stats[key] = {
-                'mean': np.mean(values),
-                'variance': np.var(values)
+                'mean': float(np.mean(values)),  # Ensure JSON serializable
+                'variance': float(np.var(values))
             }
         else:
             stats[key] = {
@@ -110,31 +148,40 @@ def print_real_metrics_report(metrics_dict, years):
     print("\n[Global Statistics]")
     print(f"{'Metric':<20} {'Mean':>12} {'Variance':>12}")
     print("-" * 44)
-    global_stats = metrics_dict['global']
+    global_stats = metrics_dict.get('global', {})
     for metric in ['real_mean', 'real_std', 'real_corr', 'real_acf', 'real_skew', 'real_kurt']:
-        print(f"{metric:<20} {global_stats[metric]['mean']:>12.6f} {global_stats[metric]['variance']:>12.6f}")
+        mean = global_stats.get(metric, {}).get('mean', 0.0)
+        variance = global_stats.get(metric, {}).get('variance', 0.0)
+        print(f"{metric:<20} {mean:>12.6f} {variance:>12.6f}")
     
     print("\n[Absolute Value Global Statistics]")
     print(f"{'Metric':<20} {'Mean':>12} {'Variance':>12}")
     print("-" * 44)
     for metric in ['abs_real_mean', 'abs_real_std', 'abs_real_corr', 'abs_real_acf', 'abs_real_skew', 'abs_real_kurt']:
-        print(f"{metric:<20} {global_stats[metric]['mean']:>12.6f} {global_stats[metric]['variance']:>12.6f}")
+        mean = global_stats.get(metric, {}).get('mean', 0.0)
+        variance = global_stats.get(metric, {}).get('variance', 0.0)
+        print(f"{metric:<20} {mean:>12.6f} {variance:>12.6f}")
     
     print("\n[Yearly Statistics]")
     print(f"{'Year':<6} {'Metric':<20} {'Mean':>12} {'Variance':>12}")
     print("-" * 50)
     for year in years:
-        year_stats = metrics_dict[f'year_{year}']
+        year_stats = metrics_dict.get(f'year_{year}', {})
+        print(f"Year {year} stats: {list(year_stats.keys())}")  # Debug
         for metric in ['real_mean', 'real_std', 'real_corr', 'real_acf', 'real_skew', 'real_kurt']:
-            print(f"{year:<6} {metric:<20} {year_stats[metric]['mean']:>12.6f} {year_stats[metric]['variance']:>12.6f}")
+            mean = year_stats.get(metric, {}).get('mean', 0.0)
+            variance = year_stats.get(metric, {}).get('variance', 0.0)
+            print(f"{year:<6} {metric:<20} {mean:>12.6f} {variance:>12.6f}")
     
     print("\n[Absolute Value Yearly Statistics]")
     print(f"{'Year':<6} {'Metric':<20} {'Mean':>12} {'Variance':>12}")
     print("-" * 50)
     for year in years:
-        year_stats = metrics_dict[f'year_{year}']
+        year_stats = metrics_dict.get(f'year_{year}', {})
         for metric in ['abs_real_mean', 'abs_real_std', 'abs_real_corr', 'abs_real_acf', 'abs_real_skew', 'abs_real_kurt']:
-            print(f"{year:<6} {metric:<20} {year_stats[metric]['mean']:>12.6f} {year_stats[metric]['variance']:>12.6f}")
+            mean = year_stats.get(metric, {}).get('mean', 0.0)
+            variance = year_stats.get(metric, {}).get('variance', 0.0)
+            print(f"{year:<6} {metric:<20} {mean:>12.6f} {variance:>12.6f}")
 
 # 4. Main Function -----------------------------------------------------------
 
@@ -159,7 +206,14 @@ def compute_real_metrics(config):
             real_data = real_seqs[i].unsqueeze(0)
             real_metrics = calculate_metrics(real_data)
             year_metrics_list.append(real_metrics)
-            all_real_metrics.append(real_metrics)
+        
+        if not year_metrics_list:
+            print(f"Warning: No metrics computed for year {year}")
+            metrics[f'year_{year}'] = compute_stats([])
+            continue
+        
+        # Debug: Print sample metrics
+        print(f"Year {year}: Sample metrics={list(year_metrics_list[0].keys())}")
         
         # Compute mean and variance
         year_stats = compute_stats(year_metrics_list)
@@ -168,6 +222,8 @@ def compute_real_metrics(config):
         # Save yearly metrics
         with open(os.path.join(output_dir, f'real_metrics_{year}.json'), 'w') as f:
             json.dump(year_stats, f, indent=2)
+        
+        all_real_metrics.extend(year_metrics_list)
     
     # Compute global metrics
     global_stats = compute_stats(all_real_metrics)
@@ -187,6 +243,6 @@ if __name__ == "__main__":
     config = {
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "real_metrics",
-        "max_samples": 100  # Limit number of sequences per year
+        "max_samples": 100
     }
     compute_real_metrics(config)
