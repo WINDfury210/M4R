@@ -18,7 +18,13 @@ class FinancialDataset(Dataset):
         self.scale_factor = scale_factor
         self.sequences = (self.sequences - self.original_mean) / self.original_std * scale_factor
         print(f"Scaled data - Mean: {self.sequences.mean().item():.6f}, Std: {self.sequences.std().item():.6f}")
-        
+        print(f"Total sequences: {len(self.sequences)}")
+        print(f"Sequences shape: {self.sequences.shape}")
+        print(f"Dates shape: {self.dates.shape}")
+        print(f"Dates[:, 0] range: {self.dates[:, 0].min().item():.6f} to {self.dates[:, 0].max().item():.6f}")
+        unique_years = torch.unique(self.dates[:, 0]).tolist()
+        print(f"Unique dates[:, 0] values: {unique_years[:10]}{'...' if len(unique_years) > 10 else ''}")
+    
     def __len__(self):
         return len(self.sequences)
     
@@ -28,10 +34,10 @@ class FinancialDataset(Dataset):
             "date": self.dates[idx]
         }
     
-    def get_all_sequences_for_year(self, year, max_samples=100):
+    def get_all_sequences_for_year(self, year, max_samples=4197):
         min_year, max_year = 2017, 2024
-        norm_year = (year - min_year) / (max_year - min_year)
-        year_mask = torch.abs(self.dates[:, 0] - norm_year) < 1e-3  # Relaxed tolerance
+        norm_year = (year - min_year) / 8.0  # 匹配数据生成公式
+        year_mask = torch.abs(self.dates[:, 0] - norm_year) < 1e-3
         year_indices = torch.where(year_mask)[0]
         print(f"Year {year}: Found {len(year_indices)} sequences")
         if len(year_indices) == 0:
@@ -64,7 +70,6 @@ def calculate_metrics(real_data):
     if real_data.dim() == 1:
         real_data = real_data.unsqueeze(0)
     
-    # Original sequence metrics
     metrics['real_mean'] = real_data.mean().item()
     metrics['real_std'] = real_data.std().item()
     
@@ -83,7 +88,6 @@ def calculate_metrics(real_data):
     metrics['real_skew'] = stats.skew(real_data_np)
     metrics['real_kurt'] = stats.kurtosis(real_data_np)
     
-    # Absolute value sequence metrics
     abs_real_data = torch.abs(real_data)
     abs_real_data_np = abs_real_data.cpu().numpy().flatten()
     
@@ -97,7 +101,7 @@ def calculate_metrics(real_data):
     try:
         abs_real_acf = acf(abs_real_data_np, nlags=20, fft=True)[1:].mean()
     except Exception as e:
-        print(f"Warning: ACF computation failed for abs, setting abs_real_acf to 0.0: {e}")
+        print(f"Warning: Abs ACF computation failed, setting abs_real_acf to 0.0: {e}")
         abs_real_acf = 0.0
     metrics['abs_real_acf'] = abs_real_acf
     
@@ -125,12 +129,12 @@ def compute_stats(metrics_list):
         }
     
     stats = {}
-    keys = metrics_list[0].keys()
+    keys = list(metrics_list[0].keys())
     for key in keys:
         values = [m[key] for m in metrics_list if key in m]
         if values:
             stats[key] = {
-                'mean': float(np.mean(values)),  # Ensure JSON serializable
+                'mean': float(np.mean(values)),
                 'variance': float(np.var(values))
             }
         else:
@@ -167,7 +171,7 @@ def print_real_metrics_report(metrics_dict, years):
     print("-" * 50)
     for year in years:
         year_stats = metrics_dict.get(f'year_{year}', {})
-        print(f"Year {year} stats: {list(year_stats.keys())}")  # Debug
+        print(f"Year {year} stats keys: {list(year_stats.keys())}")
         for metric in ['real_mean', 'real_std', 'real_corr', 'real_acf', 'real_skew', 'real_kurt']:
             mean = year_stats.get(metric, {}).get('mean', 0.0)
             variance = year_stats.get(metric, {}).get('variance', 0.0)
@@ -195,12 +199,10 @@ def compute_real_metrics(config):
     os.makedirs(output_dir, exist_ok=True)
     
     for year in years:
-        # Get all real sequences for the year
-        real_seqs, _ = dataset.get_all_sequences_for_year(year, max_samples=config.get("max_samples", 100))
+        real_seqs, _ = dataset.get_all_sequences_for_year(year, max_samples=config.get("max_samples", 4197))
         real_seqs = dataset.inverse_scale(real_seqs)
         print(f"Year {year}: {len(real_seqs)} real sequences processed")
         
-        # Compute metrics for each sequence
         year_metrics_list = []
         for i in range(len(real_seqs)):
             real_data = real_seqs[i].unsqueeze(0)
@@ -212,28 +214,22 @@ def compute_real_metrics(config):
             metrics[f'year_{year}'] = compute_stats([])
             continue
         
-        # Debug: Print sample metrics
-        print(f"Year {year}: Sample metrics={list(year_metrics_list[0].keys())}")
+        print(f"Year {year}: Sample metrics keys: {list(year_metrics_list[0].keys())}")
         
-        # Compute mean and variance
         year_stats = compute_stats(year_metrics_list)
         metrics[f'year_{year}'] = year_stats
         
-        # Save yearly metrics
         with open(os.path.join(output_dir, f'real_metrics_{year}.json'), 'w') as f:
             json.dump(year_stats, f, indent=2)
         
         all_real_metrics.extend(year_metrics_list)
     
-    # Compute global metrics
     global_stats = compute_stats(all_real_metrics)
     metrics['global'] = global_stats
     
-    # Save global metrics
-    with open(os.path.join(output_dir, f'real_metrics_global.json'), 'w') as f:
+    with open(os.path.join(output_dir, 'real_metrics_global.json'), 'w') as f:
         json.dump(global_stats, f, indent=2)
     
-    # Print report
     print_real_metrics_report(metrics, years)
     
     print(f"\nMetrics saved to {output_dir}")
