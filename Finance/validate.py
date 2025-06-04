@@ -78,20 +78,6 @@ class FinancialDataset(Dataset):
             random_dates.append(random_date)
         return torch.stack(random_dates)
     
-    def get_all_sequences_for_year(self, year, max_samples=10000):
-        min_year, max_year = 2017, 2024
-        norm_year = (year - min_year) / 8.0
-        year_mask = torch.abs(self.dates[:, 0] - norm_year) < 1e-3
-        year_indices = torch.where(year_mask)[0]
-        print(f"Year {year}: Found {len(year_indices)} sequences")
-        if len(year_indices) == 0:
-            print(f"Warning: No sequences found for year {year}")
-            return torch.zeros(0, 256), torch.tensor([])
-        if len(year_indices) > max_samples:
-            random_indices = torch.randperm(len(year_indices))[:max_samples]
-            year_indices = year_indices[random_indices]
-        return self.sequences[year_indices], year_indices
-    
     def inverse_scale(self, sequences):
         return sequences * self.original_std / self.scale_factor + self.original_mean
 
@@ -135,8 +121,18 @@ def calculate_metrics(data, dummy=None):
     if data.dim() == 1:
         data = data.unsqueeze(0)
     
+    # Check if data is valid
+    if data.numel() == 0 or torch.all(data == 0):
+        print(f"Warning: Invalid data in calculate_metrics (shape: {data.shape}, all zeros: {torch.all(data == 0)})")
+        return {
+            'gen_mean': 0.0, 'gen_std': 0.0, 'gen_corr': 0.0, 'gen_acf': 0.0,
+            'gen_skew': 0.0, 'gen_kurt': 0.0,
+            'abs_gen_mean': 0.0, 'abs_gen_std': 0.0, 'abs_gen_corr': 0.0,
+            'abs_gen_acf': 0.0, 'abs_gen_skew': 0.0, 'abs_gen_kurt': 0.0
+        }
+    
     metrics['gen_mean'] = data.mean().item()
-    metrics['gen_std'] = data.std().item()
+    metrics['gen_std'] = data.std().item() if data.numel() > 1 else 0.0
     
     data_np = data.cpu().numpy().flatten()
     lagged = data_np[:-1]
@@ -145,19 +141,21 @@ def calculate_metrics(data, dummy=None):
     
     try:
         gen_acf = acf(data_np, nlags=20, fft=True)[1:].mean()
+        if np.isnan(gen_acf):
+            gen_acf = 0.0
     except Exception as e:
         print(f"Warning: ACF computation failed, setting gen_acf to 0.0: {e}")
         gen_acf = 0.0
     metrics['gen_acf'] = gen_acf
     
-    metrics['gen_skew'] = stats.skew(data_np)
-    metrics['gen_kurt'] = stats.kurtosis(data_np)
+    metrics['gen_skew'] = stats.skew(data_np) if len(data_np) > 2 else 0.0
+    metrics['gen_kurt'] = stats.kurtosis(data_np) if len(data_np) > 3 else 0.0
     
     abs_data = torch.abs(data)
     abs_data_np = abs_data.cpu().numpy().flatten()
     
     metrics['abs_gen_mean'] = abs_data.mean().item()
-    metrics['abs_gen_std'] = abs_data.std().item()
+    metrics['abs_gen_std'] = abs_data.std().item() if abs_data.numel() > 1 else 0.0
     
     abs_lagged = abs_data_np[:-1]
     abs_next = abs_data_np[1:]
@@ -165,13 +163,15 @@ def calculate_metrics(data, dummy=None):
     
     try:
         abs_gen_acf = acf(abs_data_np, nlags=20, fft=True)[1:].mean()
+        if np.isnan(abs_gen_acf):
+            abs_gen_acf = 0.0
     except Exception as e:
         print(f"Warning: Abs ACF computation failed, setting abs_gen_acf to 0.0: {e}")
         abs_gen_acf = 0.0
     metrics['abs_gen_acf'] = abs_gen_acf
     
-    metrics['abs_gen_skew'] = stats.skew(abs_data_np)
-    metrics['abs_gen_kurt'] = stats.kurtosis(abs_data_np)
+    metrics['abs_gen_skew'] = stats.skew(abs_data_np) if len(abs_data_np) > 2 else 0.0
+    metrics['abs_gen_kurt'] = stats.kurtosis(abs_data_np) if len(abs_data_np) > 3 else 0.0
     
     return metrics
 
@@ -195,7 +195,7 @@ def average_metrics(metrics_list):
     stats = {}
     keys = list(metrics_list[0].keys())
     for key in keys:
-        values = [m[key] for m in metrics_list if key in m]
+        values = [m[key] for m in metrics_list if key in m and not np.isnan(m[key])]
         if values:
             stats[key] = {
                 'mean': float(np.mean(values)),
@@ -218,12 +218,12 @@ def save_visualizations(gen_samples, year, output_dir):
     abs_gen_sample = np.abs(gen_sample)
     
     gen_mean = np.mean(gen_sample)
-    gen_std = np.std(gen_sample)
+    gen_std = np.std(gen_sample) if len(gen_sample) > 1 else 0.0
     y_min_gen = gen_mean - 3 * gen_std
     y_max_gen = gen_mean + 3 * gen_std
     
     abs_gen_mean = np.mean(abs_gen_sample)
-    abs_gen_std = np.std(abs_gen_sample)
+    abs_gen_std = np.std(abs_gen_sample) if len(abs_gen_sample) > 1 else 0.0
     y_min_abs = max(0, abs_gen_mean - 3 * abs_gen_std)
     y_max_abs = abs_gen_mean + 3 * abs_gen_std
     
@@ -239,7 +239,10 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.grid(True, alpha=0.3)
     
     plt.subplot(1, 2, 2)
-    gen_acf = acf(gen_sample, nlags=20, fft=True)
+    try:
+        gen_acf = acf(gen_sample, nlags=20, fft=True)
+    except:
+        gen_acf = np.zeros(21)
     plt.stem(range(len(gen_acf)), gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
     plt.title(f"Autocovariance (Year {year})")
     plt.xlabel("Lag")
@@ -263,7 +266,10 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.grid(True, alpha=0.3)
     
     plt.subplot(1, 2, 2)
-    abs_gen_acf = acf(abs_gen_sample, nlags=20, fft=True)
+    try:
+        abs_gen_acf = acf(abs_gen_sample, nlags=20, fft=True)
+    except:
+        abs_gen_acf = np.zeros(21)
     plt.stem(range(len(abs_gen_acf)), abs_gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
     plt.title(f"Abs Autocovariance (Year {year})")
     plt.xlabel("Lag")
@@ -319,6 +325,46 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir):
     plt.savefig(os.path.join(output_dir, 'metrics_vs_timesteps.png'), dpi=300)
     plt.close()
 
+def print_enhanced_report(metrics_dict, years):
+    print("\n=== Validation Report ===")
+    
+    print("\n[Global Statistics]")
+    print(f"{'Metric':<15} {'Mean':>12} {'Variance':>12}")
+    print("-" * 39)
+    global_stats = metrics_dict['global']
+    for metric in ['gen_mean', 'gen_std', 'gen_corr', 'gen_acf', 'gen_skew', 'gen_kurt']:
+        mean = global_stats.get(metric, {}).get('mean', 0.0)
+        variance = global_stats.get(metric, {}).get('variance', 0.0)
+        print(f"{metric:<15} {mean:>12.6f} {variance:>12.6f}")
+    
+    print("\n[Absolute Value Global Statistics]")
+    print(f"{'Metric':<15} {'Mean':>12} {'Variance':>12}")
+    print("-" * 39)
+    for metric in ['abs_gen_mean', 'abs_gen_std', 'abs_gen_corr', 'abs_gen_acf', 'abs_gen_skew', 'abs_gen_kurt']:
+        mean = global_stats.get(metric, {}).get('mean', 0.0)
+        variance = global_stats.get(metric, {}).get('variance', 0.0)
+        print(f"{metric:<15} {mean:>12.6f} {variance:>12.6f}")
+    
+    print("\n[Yearly Statistics]")
+    print(f"{'Year':<6} {'Metric':<15} {'Mean':>12} {'Variance':>12}")
+    print("-" * 45)
+    for year in years:
+        year_stats = metrics_dict.get(f'year_{year}', {})
+        for metric in ['gen_mean', 'gen_std', 'gen_corr', 'gen_acf', 'gen_skew', 'gen_kurt']:
+            mean = year_stats.get(metric, {}).get('mean', 0.0)
+            variance = year_stats.get(metric, {}).get('variance', 0.0)
+            print(f"{year:<6} {metric:<15} {mean:>12.6f} {variance:>12.6f}")
+    
+    print("\n[Absolute Value Yearly Statistics]")
+    print(f"{'Year':<6} {'Metric':<15} {'Mean':>12} {'Variance':>12}")
+    print("-" * 45)
+    for year in years:
+        year_stats = metrics_dict.get(f'year_{year}', {})
+        for metric in ['abs_gen_mean', 'abs_gen_std', 'abs_gen_corr', 'abs_gen_acf', 'abs_gen_skew', 'abs_gen_kurt']:
+            mean = year_stats.get(metric, {}).get('mean', 0.0)
+            variance = year_stats.get(metric, {}).get('variance', 0.0)
+            print(f"{year:<6} {metric:<15} {mean:>12.6f} {variance:>12.6f}")
+
 # 5. Main Validation Function ------------------------------------------------
 
 def run_validation(config):
@@ -332,7 +378,7 @@ def run_validation(config):
         model.load_state_dict(checkpoint, strict=True)
     model.eval()
     dataset = FinancialDataset(config["data_path"], scale_factor=1.0)
-    years = list(range(2017, 2025))  # 2017-2024
+    years = list(range(2017, 2024))  # 2017-2023
     num_groups_per_year = config.get("num_groups_per_year", 10)
     step_interval = config.get("step_interval", 50)
     metrics = {}
@@ -353,6 +399,7 @@ def run_validation(config):
                 steps=1000,
                 step_interval=step_interval
             )
+            print(f"Year {year}, Sample {i}: gen_data shape {gen_data.shape}, min {gen_data.min().item():.6f}, max {gen_data.max().item():.6f}")
             gen_data = dataset.inverse_scale(gen_data)
             gen_metrics = calculate_metrics(gen_data)
             year_metrics_list.append(gen_metrics)
@@ -362,6 +409,7 @@ def run_validation(config):
             # Compute metrics for intermediate samples
             for t in gen_intermediate:
                 inter_samples = dataset.inverse_scale(gen_intermediate[t].squeeze(0))
+                print(f"Year {year}, Timestep {t}: inter_samples shape {inter_samples.shape}, min {inter_samples.min().item():.6f}, max {inter_samples.max().item():.6f}")
                 inter_metrics = calculate_metrics(inter_samples)
                 if t not in metrics_per_timestep:
                     metrics_per_timestep[t] = []
@@ -399,7 +447,7 @@ if __name__ == "__main__":
         "save_dir": "validation_results",
         "channels": [32, 128, 512, 2048],
         "num_groups_per_year": 10,
-        "step_interval": 10
+        "step_interval": 50
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     run_validation(config)
