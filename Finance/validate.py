@@ -2,6 +2,7 @@ import json
 import os
 import numpy as np
 import torch
+import random
 from torch.utils.data import Dataset
 from scipy import stats
 from statsmodels.tsa.stattools import acf
@@ -36,14 +37,18 @@ class FinancialDataset(Dataset):
         data = torch.load(data_path)
         self.sequences = data["sequences"]
         self.dates = data["start_dates"]
-        # Store scaling parameters
         self.original_mean = self.sequences.mean().item()
         self.original_std = self.sequences.std().item()
         self.scale_factor = scale_factor
-        # Apply scaling
         self.sequences = (self.sequences - self.original_mean) / self.original_std * scale_factor
         print(f"Scaled data - Mean: {self.sequences.mean().item():.6f}, Std: {self.sequences.std().item():.6f}")
-        
+        print(f"Total sequences: {len(self.sequences)}")
+        print(f"Sequences shape: {self.sequences.shape}")
+        print(f"Dates shape: {self.dates.shape}")
+        print(f"Dates[:, 0] range: {self.dates[:, 0].min().item():.6f} to {self.dates[:, 0].max().item():.6f}")
+        unique_years = torch.unique(self.dates[:, 0]).tolist()
+        print(f"Unique dates[:, 0] values: {unique_years[:10]}{'...' if len(unique_years) > 10 else ''}")
+    
     def __len__(self):
         return len(self.sequences)
     
@@ -57,283 +62,161 @@ class FinancialDataset(Dataset):
         min_year, max_year = 2017, 2024
         start_dates = []
         for year in years:
-            norm_year = (year - min_year) / (max_year - min_year)
+            norm_year = (year - min_year) / 8.0
             start_date = torch.tensor([norm_year, 0.0, 0.0], dtype=torch.float32)
             start_dates.append(start_date)
         return torch.stack(start_dates)
     
-    def get_real_sequences_for_year(self, annual_date, num_samples=10):
-        date_diffs = torch.norm(self.dates - annual_date, dim=-1)
-        closest_indices = torch.argsort(date_diffs)[:num_samples]
-        return self.sequences[closest_indices], closest_indices
+    def get_random_dates_for_year(self, year, num_samples):
+        min_year, max_year = 2017, 2024
+        norm_year = (year - min_year) / 8.0
+        random_dates = []
+        for _ in range(num_samples):
+            norm_month = random.uniform(0, 1)
+            norm_day = random.uniform(0, 1)
+            random_date = torch.tensor([norm_year, norm_month, norm_day], dtype=torch.float32)
+            random_dates.append(random_date)
+        return torch.stack(random_dates)
+    
+    def get_all_sequences_for_year(self, year, max_samples=10000):
+        min_year, max_year = 2017, 2024
+        norm_year = (year - min_year) / 8.0
+        year_mask = torch.abs(self.dates[:, 0] - norm_year) < 1e-3
+        year_indices = torch.where(year_mask)[0]
+        print(f"Year {year}: Found {len(year_indices)} sequences")
+        if len(year_indices) == 0:
+            print(f"Warning: No sequences found for year {year}")
+            return torch.zeros(0, 256), torch.tensor([])
+        if len(year_indices) > max_samples:
+            random_indices = torch.randperm(len(year_indices))[:max_samples]
+            year_indices = year_indices[random_indices]
+        return self.sequences[year_indices], year_indices
     
     def inverse_scale(self, sequences):
-        """Reverse scaling to original data scale"""
         return sequences * self.original_std / self.scale_factor + self.original_mean
 
 # 3. Validation Core ---------------------------------------------------------
 
 @torch.no_grad()
-def generate_samples(model, diffusion, condition, num_samples, device, steps=1000):
-    """Generate samples with DDPM sampling"""
+def generate_samples(model, diffusion, condition, num_samples, device, steps=1000, step_interval=50):
     model.eval()
-    labels = condition["date"].repeat(num_samples, 1).to(device)
-    year = int(condition["date"][0, 0].item() * (2024 - 2017) + 2017)
+    labels = condition["date"].to(device)
     x = torch.randn(num_samples, 256, device=device)
-    intermediate_samples = {250: [], 500: [], 750: [], 1000: []}
-    # Adjust step_indices to match num_timesteps
+    intermediate_samples = {}
     step_indices = torch.linspace(diffusion.num_timesteps - 1, 0, steps, dtype=torch.long, device=device)
+    
+    # Determine target timesteps for saving (every step_interval)
+    target_ts = list(range(0, diffusion.num_timesteps + 1, step_interval))[::-1]
+    
     for i in range(steps):
         t = step_indices[i]
         t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
-        # DDPM update
         sqrt_one_minus_alpha_bar = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         alpha_t = diffusion.alphas[t].view(-1, 1)
         beta_t = diffusion.betas[t].view(-1, 1)
         x = (x - (1 - alpha_t) / sqrt_one_minus_alpha_bar * pred_noise) / torch.sqrt(alpha_t)
         if t > 0:
             x = x + torch.sqrt(beta_t) * torch.randn_like(x)
-        # Save intermediate samples at specific timesteps
-        target_ts = [250, 500, 750, 1000]
-        if int(t+1) in target_ts:
-            intermediate_samples[int(t+1)].append(x.cpu())
-            
-    # Stack intermediate samples, handle empty cases
+        
+        # Save intermediate samples at target timesteps
+        if int(t+1) in target_ts or int(t) in target_ts:
+            intermediate_samples[int(t)] = x.cpu()
+    
     gen_intermediate = {}
     for t in intermediate_samples:
-        if intermediate_samples[t]:
-            gen_intermediate[t] = torch.stack(intermediate_samples[t], dim=0)[:10]
-        else:
-            print(f"Warning: No samples saved for t={t}")
-            gen_intermediate[t] = torch.zeros(10, num_samples, 256)  # Fallback
+        gen_intermediate[t] = intermediate_samples[t].unsqueeze(0)
     
     return x.cpu(), gen_intermediate
 
-def calculate_metrics(real_data, generated_data):
+def calculate_metrics(data, dummy=None):
     metrics = {}
     
-    if real_data.dim() == 1:
-        real_data = real_data.unsqueeze(0)
-    if generated_data.dim() == 1:
-        generated_data = generated_data.unsqueeze(0)
+    if data.dim() == 1:
+        data = data.unsqueeze(0)
     
-    # Basic statistics
-    metrics['real_mean'] = real_data.mean().item()
-    metrics['gen_mean'] = generated_data.mean().item()
-    metrics['real_std'] = real_data.std().item()
-    metrics['gen_std'] = generated_data.std().item()
+    metrics['gen_mean'] = data.mean().item()
+    metrics['gen_std'] = data.std().item()
     
-    real_data_np = real_data.cpu().numpy().flatten()
-    gen_data_np = generated_data.cpu().numpy().flatten()
+    data_np = data.cpu().numpy().flatten()
+    lagged = data_np[:-1]
+    next_val = data_np[1:]
+    metrics['gen_corr'] = np.corrcoef(lagged, next_val)[0, 1] if len(lagged) > 1 else 0.0
     
-    # Correlation
-    real_lagged = real_data_np[:-1]
-    real_next = real_data_np[1:]
-    gen_lagged = gen_data_np[:-1]
-    gen_next = gen_data_np[1:]
-    metrics['real_corr'] = np.corrcoef(real_lagged, real_next)[0, 1] if len(real_lagged) > 1 else 0.0
-    metrics['gen_corr'] = np.corrcoef(gen_lagged, gen_next)[0, 1] if len(gen_lagged) > 1 else 0.0
-    
-    # Autocorrelation
-    real_acf = acf(real_data_np, nlags=20, fft=True)[1:].mean()
-    gen_acf = acf(gen_data_np, nlags=20, fft=True)[1:].mean()
-    metrics['real_acf'] = real_acf
+    try:
+        gen_acf = acf(data_np, nlags=20, fft=True)[1:].mean()
+    except Exception as e:
+        print(f"Warning: ACF computation failed, setting gen_acf to 0.0: {e}")
+        gen_acf = 0.0
     metrics['gen_acf'] = gen_acf
     
-    # Wasserstein Distance
-    wass_dist = stats.wasserstein_distance(real_data_np, gen_data_np)
-    metrics['wass_dist'] = wass_dist
+    metrics['gen_skew'] = stats.skew(data_np)
+    metrics['gen_kurt'] = stats.kurtosis(data_np)
     
-    # Shapiro-Wilk Test
-    _, shapiro_pval = stats.shapiro(gen_data_np[:5000])  # Limit for Shapiro
-    metrics['shapiro_pval'] = shapiro_pval
+    abs_data = torch.abs(data)
+    abs_data_np = abs_data.cpu().numpy().flatten()
     
-    # Skewness and Kurtosis
-    metrics['real_skew'] = stats.skew(real_data_np)
-    metrics['gen_skew'] = stats.skew(gen_data_np)
-    metrics['real_kurt'] = stats.kurtosis(real_data_np)
-    metrics['gen_kurt'] = stats.kurtosis(gen_data_np)
+    metrics['abs_gen_mean'] = abs_data.mean().item()
+    metrics['abs_gen_std'] = abs_data.std().item()
     
-    # Compute metrics for absolute values
-    abs_real_data = torch.abs(real_data)
-    abs_gen_data = torch.abs(generated_data)
-    abs_real_data_np = abs_real_data.cpu().numpy().flatten()
-    abs_gen_data_np = abs_gen_data.cpu().numpy().flatten()
+    abs_lagged = abs_data_np[:-1]
+    abs_next = abs_data_np[1:]
+    metrics['abs_gen_corr'] = np.corrcoef(abs_lagged, abs_next)[0, 1] if len(abs_lagged) > 1 else 0.0
     
-    metrics['abs_real_mean'] = abs_real_data.mean().item()
-    metrics['abs_gen_mean'] = abs_gen_data.mean().item()
-    metrics['abs_real_std'] = abs_real_data.std().item()
-    metrics['abs_gen_std'] = abs_gen_data.std().item()
-    
-    abs_real_lagged = abs_real_data_np[:-1]
-    abs_real_next = abs_real_data_np[1:]
-    abs_gen_lagged = abs_gen_data_np[:-1]
-    abs_gen_next = abs_gen_data_np[1:]
-    metrics['abs_real_corr'] = np.corrcoef(abs_real_lagged, abs_real_next)[0, 1] if len(abs_real_lagged) > 1 else 0.0
-    metrics['abs_gen_corr'] = np.corrcoef(abs_gen_lagged, abs_gen_next)[0, 1] if len(abs_gen_lagged) > 1 else 0.0
-    
-    abs_real_acf = acf(abs_real_data_np, nlags=20, fft=True)[1:].mean()
-    abs_gen_acf = acf(abs_gen_data_np, nlags=20, fft=True)[1:].mean()
-    metrics['abs_real_acf'] = abs_real_acf
+    try:
+        abs_gen_acf = acf(abs_data_np, nlags=20, fft=True)[1:].mean()
+    except Exception as e:
+        print(f"Warning: Abs ACF computation failed, setting abs_gen_acf to 0.0: {e}")
+        abs_gen_acf = 0.0
     metrics['abs_gen_acf'] = abs_gen_acf
     
-    abs_wass_dist = stats.wasserstein_distance(abs_real_data_np, abs_gen_data_np)
-    metrics['abs_wass_dist'] = abs_wass_dist
-    
-    metrics['abs_gen_shapiro_pval'] = stats.shapiro(abs_gen_data_np[:5000])[1]
-    metrics['abs_real_skew'] = stats.skew(abs_real_data_np)
-    metrics['abs_gen_skew'] = stats.skew(abs_gen_data_np)
-    metrics['abs_real_kurt'] = stats.kurtosis(abs_real_data_np)
-    metrics['abs_gen_kurt'] = stats.kurtosis(abs_gen_data_np)
+    metrics['abs_gen_skew'] = stats.skew(abs_data_np)
+    metrics['abs_gen_kurt'] = stats.kurtosis(abs_data_np)
     
     return metrics
 
-def plot_spectrogram_comparison(real_sequences, gen_intermediate, output_path, num_samples=1000):
-    """Plot power spectrum comparison between real and generated sequences."""
-    plt.figure(figsize=(12, 8))
+def average_metrics(metrics_list):
+    if not metrics_list:
+        return {
+            'gen_mean': {'mean': 0.0, 'variance': 0.0},
+            'gen_std': {'mean': 0.0, 'variance': 0.0},
+            'gen_corr': {'mean': 0.0, 'variance': 0.0},
+            'gen_acf': {'mean': 0.0, 'variance': 0.0},
+            'gen_skew': {'mean': 0.0, 'variance': 0.0},
+            'gen_kurt': {'mean': 0.0, 'variance': 0.0},
+            'abs_gen_mean': {'mean': 0.0, 'variance': 0.0},
+            'abs_gen_std': {'mean': 0.0, 'variance': 0.0},
+            'abs_gen_corr': {'mean': 0.0, 'variance': 0.0},
+            'abs_gen_acf': {'mean': 0.0, 'variance': 0.0},
+            'abs_gen_skew': {'mean': 0.0, 'variance': 0.0},
+            'abs_gen_kurt': {'mean': 0.0, 'variance': 0.0}
+        }
     
-    # Compute power spectrum for real sequences
-    real_power = []
-    for seq in real_sequences[:num_samples]:
-        fft_result = np.fft.rfft(seq.numpy() - seq.numpy().mean())  # Remove mean
-        power = np.abs(fft_result) ** 2
-        real_power.append(power)
-    real_power = np.array(real_power)  # Shape: (num_samples, 129)
-    
-    # Normalize each sequence's power spectrum individually
-    real_power = real_power / np.sum(real_power, axis=1, keepdims=True)  # Shape: (num_samples, 129)
-    mean_real_power = np.mean(real_power, axis=0)  # Shape: (129,)
-    quantiles = np.quantile(real_power, [0.25, 0.75], axis=0)  # Shape: (2, 129)
-    
-    # Normalize frequencies
-    freqs = np.linspace(0, 0.5, len(mean_real_power))
-    
-    # Diagnostic: Print total power and standard deviation of real sequences
-    print(f"Real mean power sum: {np.sum(mean_real_power):.6f}")
-    print(f"Real sequences std: {real_sequences.std():.6f}")
-    
-    gen_intermediate = {k: gen_intermediate[k] for k in [750, 1000] if k in gen_intermediate}
-    # Plot real sequence power spectrum with shaded area and quantile lines
-    plt.fill_between(freqs, 10 * np.log10(quantiles[0] + 1e-5), 10 * np.log10(quantiles[1] + 1e-5),
-                     color='gray', alpha=0.1, label='Real 25%-75% Quantile')
-    plt.plot(freqs, 10 * np.log10(quantiles[0] + 1e-5), color='gray', linestyle='--', linewidth=1.5, label='Real 25% Quantile')
-    plt.plot(freqs, 10 * np.log10(quantiles[1] + 1e-5), color='gray', linestyle='--', linewidth=1.5, label='Real 75% Quantile')
-    plt.plot(freqs, 10 * np.log10(mean_real_power + 1e-5), color='black', label='Real Mean', linewidth=2)
+    stats = {}
+    keys = list(metrics_list[0].keys())
+    for key in keys:
+        values = [m[key] for m in metrics_list if key in m]
+        if values:
+            stats[key] = {
+                'mean': float(np.mean(values)),
+                'variance': float(np.var(values))
+            }
+        else:
+            stats[key] = {'mean': 0.0, 'variance': 0.0}
+    return stats
 
-    # Compute power spectrum for generated intermediate sequences
-    colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(gen_intermediate)))
-    for i, (t, gen_seqs) in enumerate(sorted(gen_intermediate.items())):
-        gen_power = []
-        actual_samples = min(num_samples, gen_seqs.shape[0])  # Adjust for available samples
-        for seq in gen_seqs[:actual_samples]:
-            fft_result = np.fft.rfft(seq.numpy() - seq.numpy().mean())
-            power = np.abs(fft_result) ** 2
-            gen_power.append(power)
-        gen_power = np.array(gen_power)  # Shape: (actual_samples, 129)
-        if gen_power.shape[0] > 0:  # Ensure non-empty
-            gen_power = gen_power / np.sum(gen_power, axis=1, keepdims=True)  # Normalize
-            mean_gen_power = np.mean(gen_power, axis=0)  # Shape: (129,)
-            # Match total power to real data
-            scaling_factor = np.sum(mean_real_power) / np.sum(mean_gen_power)
-            mean_gen_power *= scaling_factor
-            # Diagnostic prints
-            print(f"Timestep {t}: mean_gen_power shape = {mean_gen_power.shape}")
-            print(f"Timestep {t}: mean power sum (before scaling) = {np.sum(mean_gen_power / scaling_factor):.6f}")
-            print(f"Timestep {t}: mean power sum (after scaling) = {np.sum(mean_gen_power):.6f}")
-            print(f"Timestep {t}: gen sequences std = {gen_seqs.std():.6f}")
-            plt.plot(freqs, 10 * np.log10(mean_gen_power.T + 1e-5), color=colors[i], linewidth=1.5, alpha=0.5)
-    
-    # Customize plot
-    plt.xlabel('Frequency (cycles/day)')
-    plt.ylabel('Power (dB)')
-    plt.ylim(-60, 0)
-    plt.xlim(0, 0.5)
-    plt.title('Power Spectrum Comparison: Real vs Generated Sequences')
-    plt.legend(loc='upper right')
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300)
-    plt.close()
-
-def print_enhanced_report(metrics_dict, years):
-    print("\n=== Validation Report ===")
-    
-    # Global Statistics
-    print("\n[Global Statistics]")
-    print(f"{'Metric':<12} {'Real':>12} {'Generated':>12}")
-    print("-" * 36)
-    global_stats = metrics_dict['global']
-    print(f"{'Mean':<12} {global_stats['real_mean']:>12.6f} {global_stats['gen_mean']:>12.6f}")
-    print(f"{'Std Dev':<12} {global_stats['real_std']:>12.6f} {global_stats['gen_std']:>12.6f}")
-    print(f"{'Corr':<12} {global_stats['real_corr']:>12.6f} {global_stats['gen_corr']:>12.6f}")
-    print(f"{'Autocorr':<12} {global_stats['real_acf']:>12.6f} {global_stats['gen_acf']:>12.6f}")
-    print(f"{'Wass Dist':<12} {'-':>12} {global_stats['wass_dist']:>12.6f}")
-    print(f"{'Shapiro P':<12} {'-':>12} {global_stats['shapiro_pval']:>12.6f}")
-    print(f"{'Skew':<12} {global_stats['real_skew']:>12.6f} {global_stats['gen_skew']:>12.6f}")
-    print(f"{'Kurtosis':<12} {global_stats['real_kurt']:>12.6f} {global_stats['gen_kurt']:>12.6f}")
-    
-    # Absolute Value Global Statistics
-    print("\n[Absolute Value Global Statistics]")
-    print(f"{'Metric':<12} {'Real':>12} {'Generated':>12}")
-    print("-" * 36)
-    print(f"{'Mean':<12} {global_stats['abs_real_mean']:>12.6f} {global_stats['abs_gen_mean']:>12.6f}")
-    print(f"{'Std Dev':<12} {global_stats['abs_real_std']:>12.6f} {global_stats['abs_gen_std']:>12.6f}")
-    print(f"{'Corr':<12} {global_stats['abs_real_corr']:>12.6f} {global_stats['abs_gen_corr']:>12.6f}")
-    print(f"{'Autocorr':<12} {global_stats['abs_real_acf']:>12.6f} {global_stats['abs_gen_acf']:>12.6f}")
-    print(f"{'Wass Dist':<12} {'-':>12} {global_stats['abs_wass_dist']:>12.6f}")
-    print(f"{'Shapiro P':<12} {'-':>12} {global_stats['abs_gen_shapiro_pval']:>12.6f}")
-    print(f"{'Skew':<12} {global_stats['abs_real_skew']:>12.6f} {global_stats['abs_gen_skew']:>12.6f}")
-    print(f"{'Kurtosis':<12} {global_stats['abs_real_kurt']:>12.6f} {global_stats['abs_gen_kurt']:>12.6f}")
-    
-    # # Per-sample statistics (first 3 samples per year)
-    # print("\n[Per-Sample Statistics]")
-    # print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
-    # print("-" * 50)
-    # for year in years:
-    #     for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
-    #         for metric in ['mean', 'std', 'corr', 'acf', 'wass_dist', 'skew', 'kurt']:
-    #             if metric in ['wass_dist', 'shapiro_pval']:
-    #                 real_val = '-'
-    #                 gen_val = f"{sample_metrics[metric]:.6f}"
-    #             else:
-    #                 real_key = f'real_{metric}'
-    #                 gen_key = f'gen_{metric}'
-    #                 real_val = f"{sample_metrics[real_key]:.6f}"
-    #                 gen_val = f"{sample_metrics[gen_key]:.6f}"
-    #             print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
-    
-    # Absolute Value Per-Sample Statistics
-    print("\n[Absolute Value Per-Sample Statistics]")
-    print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
-    print("-" * 50)
-    for year in years:
-        for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
-            for metric in ['mean', 'std', 'corr', 'acf', 'wass_dist', 'skew', 'kurt']:
-                if metric in ['wass_dist', 'shapiro_pval']:
-                    real_val = '-'
-                    gen_val = f"{sample_metrics[f'abs_{metric}']:.6f}"
-                else:
-                    real_key = f'abs_real_{metric}'
-                    gen_key = f'abs_gen_{metric}'
-                    real_val = f"{sample_metrics[real_key]:.6f}"
-                    gen_val = f"{sample_metrics[gen_key]:.6f}"
-                print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
-
-def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
+def save_visualizations(gen_samples, year, output_dir):
     os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, f'metrics_{year}.json'), 'w') as f:
-        json.dump(metrics, f, indent=2)
     
     if not gen_samples:
         print(f"Warning: No generated samples for year {year}, skipping visualization")
         return
     
-    # Get first sample for plotting
-    gen_sample = gen_samples[0].numpy()
+    # 随机选择一个样本
+    idx = random.randint(0, len(gen_samples) - 1)
+    gen_sample = gen_samples[idx].numpy()
     abs_gen_sample = np.abs(gen_sample)
     
-    # Compute dynamic y-axis limits for time series
     gen_mean = np.mean(gen_sample)
     gen_std = np.std(gen_sample)
     y_min_gen = gen_mean - 3 * gen_std
@@ -344,12 +227,10 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     y_min_abs = max(0, abs_gen_mean - 3 * abs_gen_std)
     y_max_abs = abs_gen_mean + 3 * abs_gen_std
     
-    # 1. Original Sequence and Autocovariance Plot
     plt.figure(figsize=(10, 4))
     
-    # Original Time Series
     plt.subplot(1, 2, 1)
-    plt.plot(gen_sample, label="Generated")
+    plt.plot(gen_sample, label="Generated", color='blue')
     plt.title(f"Generated Sample (Year {year})")
     plt.xlabel("Time")
     plt.ylabel("Value")
@@ -357,7 +238,6 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # Original Autocovariance
     plt.subplot(1, 2, 2)
     gen_acf = acf(gen_sample, nlags=20, fft=True)
     plt.stem(range(len(gen_acf)), gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
@@ -368,15 +248,13 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'year_{year}_original_samples.png'), dpi=300)
+    plt.savefig(os.path.join(output_dir, f'year_{year}_original_sample.png'), dpi=300)
     plt.close()
     
-    # 2. Absolute Value Sequence and Autocovariance Plot
     plt.figure(figsize=(10, 4))
     
-    # Absolute Time Series
     plt.subplot(1, 2, 1)
-    plt.plot(abs_gen_sample, label="Abs Generated")
+    plt.plot(abs_gen_sample, label="Abs Generated", color='green')
     plt.title(f"Abs Generated Sample (Year {year})")
     plt.xlabel("Time")
     plt.ylabel("Absolute Value")
@@ -384,7 +262,6 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # Absolute Autocovariance
     plt.subplot(1, 2, 2)
     abs_gen_acf = acf(abs_gen_sample, nlags=20, fft=True)
     plt.stem(range(len(abs_gen_acf)), abs_gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
@@ -395,20 +272,51 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'year_{year}_absolute_samples.png'), dpi=300)
+    plt.savefig(os.path.join(output_dir, f'year_{year}_absolute_sample.png'), dpi=300)
     plt.close()
     
-    # 3. Q-Q Plot for First Sample
     plt.figure(figsize=(6, 6))
     stats.probplot(gen_sample, dist="norm", plot=plt)
     plt.title(f"Q-Q Plot (Year {year})")
     plt.xlabel("Theoretical Quantiles")
     plt.ylabel("Sample Quantiles")
-    plt.ylim(y_min_gen, y_max_gen)  # Match time series scale
-    plt.gca().set_aspect('equal', adjustable='box')  # Ensure square aspect ratio
+    plt.ylim(y_min_gen, y_max_gen)
+    plt.gca().set_aspect('equal', adjustable='box')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'year_{year}_qq_plot.png'), dpi=300)
+    plt.close()
+
+def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    
+    timesteps = sorted(metrics_per_timestep.keys(), reverse=True)  # From 1000 to 0
+    if not timesteps:
+        print("Warning: No metrics available for timesteps")
+        return
+    
+    metrics_to_plot = ['gen_mean', 'gen_std', 'gen_kurt', 'abs_gen_mean', 'abs_gen_std', 'abs_gen_kurt']
+    
+    plt.figure(figsize=(12, 8))
+    
+    for i, metric in enumerate(metrics_to_plot, 1):
+        means = [metrics_per_timestep[t].get(metric, {}).get('mean', 0.0) for t in timesteps]
+        variances = [metrics_per_timestep[t].get(metric, {}).get('variance', 0.0) for t in timesteps]
+        
+        plt.subplot(2, 3, i)
+        plt.plot(timesteps, means, marker='o', color='blue', label='Mean')
+        plt.fill_between(timesteps,
+                         [m - np.sqrt(v) for m, v in zip(means, variances)],
+                         [m + np.sqrt(v) for m, v in zip(means, variances)],
+                         color='blue', alpha=0.2, label='±1 Std Dev')
+        plt.title(metric)
+        plt.xlabel('Timestep')
+        plt.ylabel('Value')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'metrics_vs_timesteps.png'), dpi=300)
     plt.close()
 
 # 5. Main Validation Function ------------------------------------------------
@@ -423,66 +331,65 @@ def run_validation(config):
     else:
         model.load_state_dict(checkpoint, strict=True)
     model.eval()
-    dataset = FinancialDataset(config["data_path"], scale_factor=1.0)  # Same scaling as training
-    years = list(range(2017, 2025))
-    num_groups_per_year = 10
-    annual_dates = dataset.get_annual_start_dates(years).to(device)
+    dataset = FinancialDataset(config["data_path"], scale_factor=1.0)
+    years = list(range(2017, 2025))  # 2017-2024
+    num_groups_per_year = config.get("num_groups_per_year", 10)
+    step_interval = config.get("step_interval", 50)
     metrics = {}
     all_gen_samples = []
-    all_real_samples = []
-    
-    # Sample real sequences for spectrogram baseline
-    real_sequences = []
-    for year in years:
-        year_idx = year - 2017
-        annual_date = annual_dates[year_idx].to(device)
-        real_seqs, _ = dataset.get_real_sequences_for_year(annual_date.cpu(), num_samples=10)
-        real_sequences.extend(real_seqs)
-    real_sequences = torch.stack(real_sequences)
-    real_sequences = dataset.inverse_scale(real_sequences)  # Ensure real sequences are in original scale
+    metrics_per_timestep = {}
     
     for year in years:
-        year_idx = year - 2017  # Compute index for annual_dates
-        annual_date = annual_dates[year_idx].to(device)
-        condition = {"date": annual_date.unsqueeze(0)}
-        real_sequences_year, _ = dataset.get_real_sequences_for_year(
-            annual_date.cpu(), num_samples=num_groups_per_year)
+        random_dates = dataset.get_random_dates_for_year(year, num_groups_per_year).to(device)
         year_metrics_list = []
         year_gen_samples = []
-        year_real_samples = []  # Initialize list
-        gen_data, gen_intermediate = generate_samples(
-            model, diffusion, condition,
-            num_samples=num_groups_per_year,
-            device=device,
-            steps=500  # Match num_timesteps
-        )
-        # Inverse scale generated and real data
-        gen_data = dataset.inverse_scale(gen_data)
-        real_sequences_year = dataset.inverse_scale(real_sequences_year)
-        for group_idx in range(num_groups_per_year):
-            group_data = gen_data[group_idx:group_idx+1]
-            real_data = real_sequences_year[group_idx].unsqueeze(0)
-            group_metrics = calculate_metrics(real_data, group_data)
-            year_metrics_list.append(group_metrics)
-            if group_idx < 3:
-                year_real_samples.append(real_data.squeeze())
-                year_gen_samples.append(group_data.squeeze())
-            all_gen_samples.append(group_data.squeeze())
-            all_real_samples.append(real_data.squeeze())
-        metrics[f'year_{year}'] = year_metrics_list
-        save_visualizations(year_real_samples, year_gen_samples, year_metrics_list, year, config["save_dir"])
+        
+        for i in range(num_groups_per_year):
+            condition = {"date": random_dates[i].unsqueeze(0)}
+            gen_data, gen_intermediate = generate_samples(
+                model, diffusion, condition,
+                num_samples=1,
+                device=device,
+                steps=1000,
+                step_interval=step_interval
+            )
+            gen_data = dataset.inverse_scale(gen_data)
+            gen_metrics = calculate_metrics(gen_data)
+            year_metrics_list.append(gen_metrics)
+            year_gen_samples.append(gen_data.squeeze())
+            all_gen_samples.append(gen_data.squeeze())
+            
+            # Compute metrics for intermediate samples
+            for t in gen_intermediate:
+                inter_samples = dataset.inverse_scale(gen_intermediate[t].squeeze(0))
+                inter_metrics = calculate_metrics(inter_samples)
+                if t not in metrics_per_timestep:
+                    metrics_per_timestep[t] = []
+                metrics_per_timestep[t].append(inter_metrics)
+        
+        # Compute average metrics
+        metrics[f'year_{year}'] = average_metrics(year_metrics_list)
+        
+        # Save visualizations for one random sample
+        save_visualizations(year_gen_samples, year, config["save_dir"])
     
+    # Compute global metrics
     gen_all = torch.cat(all_gen_samples, dim=0)
-    real_all_subset = torch.cat(all_real_samples, dim=0)
-    metrics['global'] = calculate_metrics(real_all_subset, gen_all)
+    metrics['global'] = average_metrics([calculate_metrics(gen_all[i].unsqueeze(0)) for i in range(gen_all.shape[0])])
+    
+    # Average metrics per timestep
+    for t in metrics_per_timestep:
+        metrics_per_timestep[t] = average_metrics(metrics_per_timestep[t])
+    
+    # Print report
     print_enhanced_report(metrics, years)
     
-    # Generate spectrogram comparison
+    # Plot metrics vs timesteps
+    plot_metrics_vs_timesteps(metrics_per_timestep, config["save_dir"])
+    
     output_dir = config["save_dir"]
     os.makedirs(output_dir, exist_ok=True)
-    plot_spectrogram_comparison(real_sequences, gen_intermediate, 
-                               os.path.join(output_dir, 'spectrogram_comparison.png'))
-    print(f"\nSpectrogram comparison saved to {os.path.join(output_dir, 'spectrogram_comparison.png')}")
+    print(f"\nMetrics vs timesteps plot saved to {os.path.join(output_dir, 'metrics_vs_timesteps.png')}")
     print(f"\nValidation complete! Results saved to {config['save_dir']}")
 
 if __name__ == "__main__":
@@ -490,7 +397,9 @@ if __name__ == "__main__":
         "model_path": "saved_models/final_model.pth",
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "validation_results",
-        "channels": [32, 128, 512, 2048]
+        "channels": [32, 128, 512, 2048],
+        "num_groups_per_year": 10,
+        "step_interval": 10
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     run_validation(config)
