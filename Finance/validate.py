@@ -447,7 +447,7 @@ if __name__ == "__main__":
         "model_path": "saved_models/model_epoch_500.pth",
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "validation_results",
-        "channels": [32, 64, 128, 512, 1024, 2048]
+        "channels": [32, 128, 512, 2048]
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     run_validation(config)
