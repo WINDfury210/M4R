@@ -128,7 +128,7 @@ def train_model(config):
     # Load checkpoint
     start_epoch = 0
     checkpoint_files = sorted(
-        glob(os.path.join(config["save_dir"], "model_epoch_*.pth")),
+        glob(os.path.join(config["save_dir"], "model2_epoch_*.pth")),
         key=lambda x: int(re.search(r'model_epoch_(\d+).pth', x).group(1))
     )
     if checkpoint_files:
@@ -146,7 +146,7 @@ def train_model(config):
     max_checkpoints = 2
     def clean_old_checkpoints():
         checkpoints = sorted(
-            glob(os.path.join(config["save_dir"], "model_epoch_*.pth")),
+            glob(os.path.join(config["save_dir"], "model2_epoch_*.pth")),
             key=lambda x: int(re.search(r'model_epoch_(\d+).pth', x).group(1))
         )
         if len(checkpoints) > max_checkpoints:
