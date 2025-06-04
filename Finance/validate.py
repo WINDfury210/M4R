@@ -286,22 +286,22 @@ def print_enhanced_report(metrics_dict, years):
     print(f"{'Skew':<12} {global_stats['abs_real_skew']:>12.6f} {global_stats['abs_gen_skew']:>12.6f}")
     print(f"{'Kurtosis':<12} {global_stats['abs_real_kurt']:>12.6f} {global_stats['abs_gen_kurt']:>12.6f}")
     
-    # Per-sample statistics (first 3 samples per year)
-    print("\n[Per-Sample Statistics]")
-    print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
-    print("-" * 50)
-    for year in years:
-        for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
-            for metric in ['mean', 'std', 'corr', 'acf', 'wass_dist', 'skew', 'kurt']:
-                if metric in ['wass_dist', 'shapiro_pval']:
-                    real_val = '-'
-                    gen_val = f"{sample_metrics[metric]:.6f}"
-                else:
-                    real_key = f'real_{metric}'
-                    gen_key = f'gen_{metric}'
-                    real_val = f"{sample_metrics[real_key]:.6f}"
-                    gen_val = f"{sample_metrics[gen_key]:.6f}"
-                print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
+    # # Per-sample statistics (first 3 samples per year)
+    # print("\n[Per-Sample Statistics]")
+    # print(f"{'Year':<6} {'Sample':<8} {'Metric':<12} {'Real':>12} {'Generated':>12}")
+    # print("-" * 50)
+    # for year in years:
+    #     for i, sample_metrics in enumerate(metrics_dict[f'year_{year}'][:3]):
+    #         for metric in ['mean', 'std', 'corr', 'acf', 'wass_dist', 'skew', 'kurt']:
+    #             if metric in ['wass_dist', 'shapiro_pval']:
+    #                 real_val = '-'
+    #                 gen_val = f"{sample_metrics[metric]:.6f}"
+    #             else:
+    #                 real_key = f'real_{metric}'
+    #                 gen_key = f'gen_{metric}'
+    #                 real_val = f"{sample_metrics[real_key]:.6f}"
+    #                 gen_val = f"{sample_metrics[gen_key]:.6f}"
+    #             print(f"{year:<6} {i+1:<8} {metric.capitalize():<12} {real_val:>12} {gen_val:>12}")
     
     # Absolute Value Per-Sample Statistics
     print("\n[Absolute Value Per-Sample Statistics]")
