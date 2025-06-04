@@ -447,7 +447,7 @@ if __name__ == "__main__":
         "save_dir": "validation_results",
         "channels": [32, 128, 512, 2048],
         "num_groups_per_year": 10,
-        "step_interval": 50
+        "step_interval": 100
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     run_validation(config)
