@@ -399,7 +399,6 @@ def run_validation(config):
                 steps=1000,
                 step_interval=step_interval
             )
-            print(f"Year {year}, Sample {i}: gen_data shape {gen_data.shape}, min {gen_data.min().item():.6f}, max {gen_data.max().item():.6f}")
             gen_data = dataset.inverse_scale(gen_data)
             gen_metrics = calculate_metrics(gen_data)
             year_metrics_list.append(gen_metrics)
