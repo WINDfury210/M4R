@@ -106,8 +106,8 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
             x = x + torch.sqrt(beta_t) * torch.randn_like(x)
         
         # Save intermediate samples at target timesteps
-        if int(t+1) in target_ts or int(t) in target_ts:
-            intermediate_samples[int(t)] = x.cpu()
+        if int(t+1) in target_ts:
+            intermediate_samples[int(t+1)] = x.cpu()
     
     gen_intermediate = {}
     for t in intermediate_samples:
@@ -409,7 +409,6 @@ def run_validation(config):
             # Compute metrics for intermediate samples
             for t in gen_intermediate:
                 inter_samples = dataset.inverse_scale(gen_intermediate[t].squeeze(0))
-                print(f"Year {year}, Timestep {t}: inter_samples shape {inter_samples.shape}, min {inter_samples.min().item():.6f}, max {inter_samples.max().item():.6f}")
                 inter_metrics = calculate_metrics(inter_samples)
                 if t not in metrics_per_timestep:
                     metrics_per_timestep[t] = []
@@ -446,8 +445,8 @@ if __name__ == "__main__":
         "data_path": "financial_data/sequences/sequences_256.pt",
         "save_dir": "validation_results",
         "channels": [32, 128, 512, 2048],
-        "num_groups_per_year": 10,
-        "step_interval": 100
+        "num_groups_per_year": 100,
+        "step_interval": 10
     }
     os.makedirs(config["save_dir"], exist_ok=True)
     run_validation(config)
