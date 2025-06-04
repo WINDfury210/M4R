@@ -325,47 +325,90 @@ def save_visualizations(real_samples, gen_samples, metrics, year, output_dir):
     with open(os.path.join(output_dir, f'metrics_{year}.json'), 'w') as f:
         json.dump(metrics, f, indent=2)
     
-    # Main figure: Time series and Autocovariance for original and absolute values
-    plt.figure(figsize=(12, 12))
-    for i in range(min(3, len(gen_samples))):
-        # Original Generated time series plots (first column, rows 1-3)
-        plt.subplot(6, 2, 2*i + 1)
-        plt.plot(gen_samples[i].numpy(), label="Generated")
-        plt.title(f"Gen Sample {i+1} (Year {year})")
-        plt.legend()
-        # Original Autocovariance plot (second column, rows 1-3)
-        plt.subplot(6, 2, 2*i + 2)
-        gen_acf = acf(gen_samples[i].numpy(), nlags=20, fft=True)
-        plt.stem(range(len(gen_acf)), gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
-        plt.title(f"Autocov Gen Sample {i+1}")
-        plt.xlabel('Lag')
-        plt.ylabel('Autocovariance')
-        
-        # Absolute Generated time series plots (first column, rows 4-6)
-        plt.subplot(6, 2, 2*i + 7)
-        plt.plot(np.abs(gen_samples[i].numpy()), label="Abs Generated")
-        plt.title(f"Abs Gen Sample {i+1} (Year {year})")
-        plt.legend()
-        # Absolute Autocovariance plot (second column, rows 4-6)
-        plt.subplot(6, 2, 2*i + 8)
-        abs_gen_acf = acf(np.abs(gen_samples[i].numpy()), nlags=20, fft=True)
-        plt.stem(range(len(abs_gen_acf)), abs_gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
-        plt.title(f"Autocov Abs Gen Sample {i+1}")
-        plt.xlabel('Lag')
-        plt.ylabel('Autocovariance')
+    if not gen_samples:
+        print(f"Warning: No generated samples for year {year}, skipping visualization")
+        return
+    
+    # Get first sample for plotting
+    gen_sample = gen_samples[0].numpy()
+    abs_gen_sample = np.abs(gen_sample)
+    
+    # Compute dynamic y-axis limits for time series
+    gen_mean = np.mean(gen_sample)
+    gen_std = np.std(gen_sample)
+    y_min_gen = gen_mean - 3 * gen_std
+    y_max_gen = gen_mean + 3 * gen_std
+    
+    abs_gen_mean = np.mean(abs_gen_sample)
+    abs_gen_std = np.std(abs_gen_sample)
+    y_min_abs = max(0, abs_gen_mean - 3 * abs_gen_std)
+    y_max_abs = abs_gen_mean + 3 * abs_gen_std
+    
+    # 1. Original Sequence and Autocovariance Plot
+    plt.figure(figsize=(10, 4))
+    
+    # Original Time Series
+    plt.subplot(1, 2, 1)
+    plt.plot(gen_sample, label="Generated")
+    plt.title(f"Generated Sample (Year {year})")
+    plt.xlabel("Time")
+    plt.ylabel("Value")
+    plt.ylim(y_min_gen, y_max_gen)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Original Autocovariance
+    plt.subplot(1, 2, 2)
+    gen_acf = acf(gen_sample, nlags=20, fft=True)
+    plt.stem(range(len(gen_acf)), gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
+    plt.title(f"Autocovariance (Year {year})")
+    plt.xlabel("Lag")
+    plt.ylabel("Autocovariance")
+    plt.ylim(min(gen_acf) - 0.1, max(gen_acf) + 0.1)
+    plt.grid(True, alpha=0.3)
+    
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'year_{year}_samples.png'))
+    plt.savefig(os.path.join(output_dir, f'year_{year}_original_samples.png'), dpi=300)
     plt.close()
     
-    # Separate figure: Q-Q Plots
-    plt.figure(figsize=(10, 15))
-    for i in range(min(3, len(gen_samples))):
-        plt.subplot(3, 1, i + 1)
-        stats.probplot(gen_samples[i].numpy(), dist="norm", plot=plt)
-        plt.axis('equal')  # Ensure square aspect ratio
-        plt.title(f"Q-Q Plot Gen Sample {i+1} (Year {year})")
+    # 2. Absolute Value Sequence and Autocovariance Plot
+    plt.figure(figsize=(10, 4))
+    
+    # Absolute Time Series
+    plt.subplot(1, 2, 1)
+    plt.plot(abs_gen_sample, label="Abs Generated")
+    plt.title(f"Abs Generated Sample (Year {year})")
+    plt.xlabel("Time")
+    plt.ylabel("Absolute Value")
+    plt.ylim(y_min_abs, y_max_abs)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Absolute Autocovariance
+    plt.subplot(1, 2, 2)
+    abs_gen_acf = acf(abs_gen_sample, nlags=20, fft=True)
+    plt.stem(range(len(abs_gen_acf)), abs_gen_acf, linefmt='b-', markerfmt='bo', basefmt='r-')
+    plt.title(f"Abs Autocovariance (Year {year})")
+    plt.xlabel("Lag")
+    plt.ylabel("Autocovariance")
+    plt.ylim(min(abs_gen_acf) - 0.1, max(abs_gen_acf) + 0.1)
+    plt.grid(True, alpha=0.3)
+    
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'year_{year}_qq_plots.png'))
+    plt.savefig(os.path.join(output_dir, f'year_{year}_absolute_samples.png'), dpi=300)
+    plt.close()
+    
+    # 3. Q-Q Plot for First Sample
+    plt.figure(figsize=(6, 6))
+    stats.probplot(gen_sample, dist="norm", plot=plt)
+    plt.title(f"Q-Q Plot (Year {year})")
+    plt.xlabel("Theoretical Quantiles")
+    plt.ylabel("Sample Quantiles")
+    plt.ylim(y_min_gen, y_max_gen)  # Match time series scale
+    plt.gca().set_aspect('equal', adjustable='box')  # Ensure square aspect ratio
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'year_{year}_qq_plot.png'), dpi=300)
     plt.close()
 
 # 5. Main Validation Function ------------------------------------------------
@@ -411,7 +454,7 @@ def run_validation(config):
             model, diffusion, condition,
             num_samples=num_groups_per_year,
             device=device,
-            steps=1000  # Match num_timesteps
+            steps=500  # Match num_timesteps
         )
         # Inverse scale generated and real data
         gen_data = dataset.inverse_scale(gen_data)
