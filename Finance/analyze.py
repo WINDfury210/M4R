@@ -7,18 +7,6 @@ import matplotlib.pyplot as plt
 from scipy import stats
 from statsmodels.tsa.stattools import acf
 
-# FinancialDataset from generate.py
-class FinancialDataset:
-    def __init__(self, data_path, scale_factor=1.0):
-        data = torch.load(data_path)
-        self.sequences = data["sequences"]
-        self.dates = data["start_dates"]
-        self.original_mean = self.sequences.mean().item()
-        self.original_std = self.sequences.std().item()
-        self.scale_factor = scale_factor
-        self.sequences = (self.sequences - self.original_mean) / self.original_std * scale_factor
-    
-
 # 1. Metrics Calculation -----------------------------------------------------
 
 def calculate_metrics(data, dummy=None):
@@ -28,8 +16,8 @@ def calculate_metrics(data, dummy=None):
         data = data.unsqueeze(0)
     
     # Replace NaN/Inf with 0 for stability
-    # data = torch.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-    
+    data = torch.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+    print(torch.any(data=='NaN'))
     if data.numel() == 0 or torch.all(data == 0):
         print(f"Warning: Invalid data in calculate_metrics (shape: {data.shape}, all zeros: {torch.all(data == 0)})")
         return {
@@ -42,8 +30,6 @@ def calculate_metrics(data, dummy=None):
     data_np = data.cpu().numpy()
     if data_np.ndim == 1:
         data_np = data_np[np.newaxis, :]
-    
-
     
     metrics['gen_mean'] = float(data_np.mean()) if not np.isnan(data_np.mean()) else 0.0
     metrics['gen_std'] = float(data_np.std()) if data_np.size > 1 and not np.isnan(data_np.std()) else 0.0
@@ -359,9 +345,6 @@ def validate_generated_data(config):
     generated_dir = config["generated_dir"]
     output_dir = config["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Load dataset for inverse scaling
-    dataset = FinancialDataset(config["data_path"])
     
     metrics = {}
     all_gen_samples = []
