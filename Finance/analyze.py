@@ -142,7 +142,7 @@ def save_visualizations(gen_samples, year, output_dir):
     
     plt.figure(figsize=(12, 6))
     
-    plt.subplot(1, 2, 1)
+    plt.subplot(2, 1, 1)
     plt.plot(gen_sample, label="Generated", color='blue')
     plt.title(f"Generated Sample (Year {year})")
     plt.xlabel("Time")
@@ -150,7 +150,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    plt.subplot(1, 2, 2)
+    plt.subplot(2, 1, 2)
     try:
         gen_acf = acf(gen_sample, nlags=20, fft=True)
     except:
@@ -167,7 +167,7 @@ def save_visualizations(gen_samples, year, output_dir):
     
     plt.figure(figsize=(12, 6))
     
-    plt.subplot(1, 2, 1)
+    plt.subplot(2, 1, 1)
     plt.plot(abs_gen_sample, label="Abs Generated", color='green')
     plt.title(f"Abs Generated Sample (Year {year})")
     plt.xlabel("Time")
@@ -175,7 +175,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    plt.subplot(1, 2, 2)
+    plt.subplot(2, 1, 2)
     try:
         abs_gen_acf = acf(abs_gen_sample, nlags=20, fft=True)
     except:
@@ -210,7 +210,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
     }
     
     # Global plot
-    global_timesteps = sorted(metrics_per_timestep['global'].keys(), reverse=False)
+    global_timesteps = sorted(metrics_per_timestep['global'].keys(), reverse=True)
     if global_timesteps:
         try:
             with open(os.path.join(real_metrics_dir, 'real_metrics_global.json'), 'r') as f:
@@ -252,7 +252,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: No metrics for year {year}")
             continue
         
-        year_timesteps = sorted(metrics_per_timestep['years'][year].keys(), reverse=False)
+        year_timesteps = sorted(metrics_per_timestep['years'][year].keys(), reverse=True)
         if not year_timesteps:
             print(f"Warning: No timesteps for year {year}")
             continue
@@ -264,7 +264,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: real_metrics_{year}.json not found in {real_metrics_dir}")
             real_year = {}
         
-        plt.figure()
+        plt.figure(figsize=(15, 10))
         for i, metric in enumerate(metrics_to_plot, 1):
             means = [metrics_per_timestep['years'][year][t].get(metric, {}).get('mean', 0.0) for t in year_timesteps]
             variances = [metrics_per_timestep['years'][year][t].get(metric, {}).get('variance', 0.0) for t in year_timesteps]
@@ -377,7 +377,7 @@ def validate_generated_data(config):
             continue
         # Use intermediate_samples[800] as final sequences
         sequences = intermediate_samples[800]  # Shape: [100, 256]
-        # Map timesteps [1000, ..., 800] to [0, ..., 1000]
+        # Map timesteps [0, ..., 800] to [0, ..., 1000]
         intermediate_samples_new = {}
         
         for t in intermediate_samples:
