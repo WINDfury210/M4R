@@ -45,8 +45,7 @@ def calculate_metrics(data, dummy=None):
     if data_np.ndim == 1:
         data_np = data_np[np.newaxis, :]
     
-    # Debug: Print input data stats
-    print(f"Debug: calculate_metrics input - mean={data_np.mean():.6f}, std={data_np.std():.6f}")
+
     
     metrics['gen_mean'] = float(data_np.mean()) if not np.isnan(data_np.mean()) else 0.0
     metrics['gen_std'] = float(data_np.std()) if data_np.size > 1 and not np.isnan(data_np.std()) else 0.0
@@ -227,9 +226,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             means = [metrics_per_timestep['global'][t].get(metric, {}).get('mean', 0.0) for t in global_timesteps]
             variances = [metrics_per_timestep['global'][t].get(metric, {}).get('variance', 0.0) for t in global_timesteps]
             
-            # Debug: Print metric values
-            print(f"Debug: Global {metric} at timesteps {global_timesteps[:5]}...: means={means[:5]}, variances={variances[:5]}")
-            
+
             plt.subplot(2, 3, i)
             plt.plot(global_timesteps[::-1], means, color='blue', label='Generated Mean')
             plt.fill_between(global_timesteps[::-1],
@@ -417,7 +414,7 @@ def validate_generated_data(config):
         for t in intermediate_samples:
             inter_samples = intermediate_samples[t]  # [100, 256]
             # Inverse scale to original scale
-            inter_samples = dataset.inverse_scale(inter_samples)
+            
             if torch.isnan(inter_samples).any() or torch.isinf(inter_samples).any():
                 print(f"Warning: Invalid data in timestep {t} (NaN: {torch.isnan(inter_samples).any()}, Inf: {torch.isinf(inter_samples).any()})")
                 continue
