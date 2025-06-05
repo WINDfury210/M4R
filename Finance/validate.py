@@ -48,6 +48,7 @@ class FinancialDataset(Dataset):
         print(f"Dates[:, 0] range: {self.dates[:, 0].min().item():.6f} to {self.dates[:, 0].max().item():.6f}")
         unique_years = torch.unique(self.dates[:, 0]).tolist()
         print(f"Unique dates[:, 0] values: {unique_years[:10]}{'...' if len(unique_years) > 10 else ''}")
+        print(f"Original mean: {self.original_mean:.6f}, std: {self.original_std:.6f}")
     
     def __len__(self):
         return len(self.sequences)
@@ -91,7 +92,6 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
     intermediate_samples = {}
     step_indices = torch.linspace(diffusion.num_timesteps - 1, 0, steps, dtype=torch.long, device=device)
     
-    # Determine target timesteps for saving (every step_interval)
     target_ts = list(range(0, diffusion.num_timesteps + 1, step_interval))[::-1]
     
     for i in range(steps):
@@ -105,9 +105,8 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=100
         if t > 0:
             x = x + torch.sqrt(beta_t) * torch.randn_like(x)
         
-        # Save intermediate samples at target timesteps
-        if int(t+1) in target_ts:
-            intermediate_samples[int(t+1)] = x.cpu()
+        if int(t+1) in target_ts or int(t) in target_ts:
+            intermediate_samples[int(t)] = x.cpu()
     
     gen_intermediate = {}
     for t in intermediate_samples:
@@ -121,7 +120,6 @@ def calculate_metrics(data, dummy=None):
     if data.dim() == 1:
         data = data.unsqueeze(0)
     
-    # Check if data is valid
     if data.numel() == 0 or torch.all(data == 0):
         print(f"Warning: Invalid data in calculate_metrics (shape: {data.shape}, all zeros: {torch.all(data == 0)})")
         return {
@@ -131,47 +129,52 @@ def calculate_metrics(data, dummy=None):
             'abs_gen_acf': 0.0, 'abs_gen_skew': 0.0, 'abs_gen_kurt': 0.0
         }
     
-    metrics['gen_mean'] = data.mean().item()
-    metrics['gen_std'] = data.std().item() if data.numel() > 1 else 0.0
+    data_np = data.cpu().numpy()
+    if data_np.ndim == 1:
+        data_np = data_np[np.newaxis, :]
     
-    data_np = data.cpu().numpy().flatten()
-    lagged = data_np[:-1]
-    next_val = data_np[1:]
-    metrics['gen_corr'] = np.corrcoef(lagged, next_val)[0, 1] if len(lagged) > 1 else 0.0
+    metrics['gen_mean'] = float(data_np.mean())
+    metrics['gen_std'] = float(data_np.std()) if data_np.size > 1 else 0.0
     
-    try:
-        gen_acf = acf(data_np, nlags=20, fft=True)[1:].mean()
-        if np.isnan(gen_acf):
-            gen_acf = 0.0
-    except Exception as e:
-        print(f"Warning: ACF computation failed, setting gen_acf to 0.0: {e}")
-        gen_acf = 0.0
-    metrics['gen_acf'] = gen_acf
+    sample = data_np[0] if data_np.shape[0] == 1 else data_np.flatten()
+    if len(sample) > 1 and np.var(sample) > 1e-10:
+        lagged = sample[:-1]
+        next_val = sample[1:]
+        metrics['gen_corr'] = np.corrcoef(lagged, next_val)[0, 1] if len(lagged) > 1 else 0.0
+        try:
+            gen_acf = acf(sample, nlags=20, fft=True)[1:]
+            metrics['gen_acf'] = float(gen_acf.mean()) if not np.isnan(gen_acf).all() else 0.0
+        except Exception as e:
+            print(f"Warning: ACF computation failed: {e}")
+            metrics['gen_acf'] = 0.0
+    else:
+        metrics['gen_corr'] = 0.0
+        metrics['gen_acf'] = 0.0
     
-    metrics['gen_skew'] = stats.skew(data_np) if len(data_np) > 2 else 0.0
-    metrics['gen_kurt'] = stats.kurtosis(data_np) if len(data_np) > 3 else 0.0
+    metrics['gen_skew'] = float(stats.skew(sample)) if len(sample) > 2 else 0.0
+    metrics['gen_kurt'] = float(stats.kurtosis(sample)) if len(sample) > 3 else 0.0
     
-    abs_data = torch.abs(data)
-    abs_data_np = abs_data.cpu().numpy().flatten()
+    abs_data_np = np.abs(data_np)
+    metrics['abs_gen_mean'] = float(abs_data_np.mean())
+    metrics['abs_gen_std'] = float(abs_data_np.std()) if abs_data_np.size > 1 else 0.0
     
-    metrics['abs_gen_mean'] = abs_data.mean().item()
-    metrics['abs_gen_std'] = abs_data.std().item() if abs_data.numel() > 1 else 0.0
+    abs_sample = abs_data_np[0] if abs_data_np.shape[0] == 1 else abs_data_np.flatten()
+    if len(abs_sample) > 1 and np.var(abs_sample) > 1e-10:
+        abs_lagged = abs_sample[:-1]
+        abs_next = abs_sample[1:]
+        metrics['abs_gen_corr'] = np.corrcoef(abs_lagged, abs_next)[0, 1] if len(abs_lagged) > 1 else 0.0
+        try:
+            abs_gen_acf = acf(abs_sample, nlags=20, fft=True)[1:]
+            metrics['abs_gen_acf'] = float(abs_gen_acf.mean()) if not np.isnan(abs_gen_acf).all() else 0.0
+        except Exception as e:
+            print(f"Warning: Abs ACF computation failed: {e}")
+            metrics['abs_gen_acf'] = 0.0
+    else:
+        metrics['abs_gen_corr'] = 0.0
+        metrics['abs_gen_acf'] = 0.0
     
-    abs_lagged = abs_data_np[:-1]
-    abs_next = abs_data_np[1:]
-    metrics['abs_gen_corr'] = np.corrcoef(abs_lagged, abs_next)[0, 1] if len(abs_lagged) > 1 else 0.0
-    
-    try:
-        abs_gen_acf = acf(abs_data_np, nlags=20, fft=True)[1:].mean()
-        if np.isnan(abs_gen_acf):
-            abs_gen_acf = 0.0
-    except Exception as e:
-        print(f"Warning: Abs ACF computation failed, setting abs_gen_acf to 0.0: {e}")
-        abs_gen_acf = 0.0
-    metrics['abs_gen_acf'] = abs_gen_acf
-    
-    metrics['abs_gen_skew'] = stats.skew(abs_data_np) if len(abs_data_np) > 2 else 0.0
-    metrics['abs_gen_kurt'] = stats.kurtosis(abs_data_np) if len(abs_data_np) > 3 else 0.0
+    metrics['abs_gen_skew'] = float(stats.skew(abs_sample)) if len(abs_sample) > 2 else 0.0
+    metrics['abs_gen_kurt'] = float(stats.kurtosis(abs_sample)) if len(abs_sample) > 3 else 0.0
     
     return metrics
 
@@ -199,7 +202,7 @@ def average_metrics(metrics_list):
         if values:
             stats[key] = {
                 'mean': float(np.mean(values)),
-                'variance': float(np.var(values))
+                'variance': float(np.var(values)) if len(values) > 1 else 0.0
             }
         else:
             stats[key] = {'mean': 0.0, 'variance': 0.0}
@@ -212,29 +215,17 @@ def save_visualizations(gen_samples, year, output_dir):
         print(f"Warning: No generated samples for year {year}, skipping visualization")
         return
     
-    # 随机选择一个样本
     idx = random.randint(0, len(gen_samples) - 1)
     gen_sample = gen_samples[idx].numpy()
     abs_gen_sample = np.abs(gen_sample)
     
-    gen_mean = np.mean(gen_sample)
-    gen_std = np.std(gen_sample) if len(gen_sample) > 1 else 0.0
-    y_min_gen = gen_mean - 3 * gen_std
-    y_max_gen = gen_mean + 3 * gen_std
-    
-    abs_gen_mean = np.mean(abs_gen_sample)
-    abs_gen_std = np.std(abs_gen_sample) if len(abs_gen_sample) > 1 else 0.0
-    y_min_abs = max(0, abs_gen_mean - 3 * abs_gen_std)
-    y_max_abs = abs_gen_mean + 3 * abs_gen_std
-    
-    plt.figure(figsize=(10, 4))
+    plt.figure()
     
     plt.subplot(1, 2, 1)
     plt.plot(gen_sample, label="Generated", color='blue')
     plt.title(f"Generated Sample (Year {year})")
     plt.xlabel("Time")
     plt.ylabel("Value")
-    plt.ylim(y_min_gen, y_max_gen)
     plt.legend()
     plt.grid(True, alpha=0.3)
     
@@ -247,7 +238,6 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.title(f"Autocovariance (Year {year})")
     plt.xlabel("Lag")
     plt.ylabel("Autocovariance")
-    plt.ylim(min(gen_acf) - 0.1, max(gen_acf) + 0.1)
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -261,7 +251,6 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.title(f"Abs Generated Sample (Year {year})")
     plt.xlabel("Time")
     plt.ylabel("Absolute Value")
-    plt.ylim(y_min_abs, y_max_abs)
     plt.legend()
     plt.grid(True, alpha=0.3)
     
@@ -274,56 +263,113 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.title(f"Abs Autocovariance (Year {year})")
     plt.xlabel("Lag")
     plt.ylabel("Autocovariance")
-    plt.ylim(min(abs_gen_acf) - 0.1, max(abs_gen_acf) + 0.1)
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'year_{year}_absolute_sample.png'), dpi=300)
     plt.close()
     
-    plt.figure(figsize=(6, 6))
+    plt.figure()
     stats.probplot(gen_sample, dist="norm", plot=plt)
     plt.title(f"Q-Q Plot (Year {year})")
     plt.xlabel("Theoretical Quantiles")
     plt.ylabel("Sample Quantiles")
-    plt.ylim(y_min_gen, y_max_gen)
     plt.gca().set_aspect('equal', adjustable='box')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'year_{year}_qq_plot.png'), dpi=300)
     plt.close()
 
-def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir):
+def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metrics_dir="real_metrics"):
     os.makedirs(output_dir, exist_ok=True)
     
-    timesteps = sorted(metrics_per_timestep.keys(), reverse=True)  # From 1000 to 0
-    if not timesteps:
-        print("Warning: No metrics available for timesteps")
-        return
-    
     metrics_to_plot = ['gen_mean', 'gen_std', 'gen_kurt', 'abs_gen_mean', 'abs_gen_std', 'abs_gen_kurt']
+    real_metrics_map = {
+        'gen_mean': 'real_mean', 'gen_std': 'real_std', 'gen_kurt': 'real_kurt',
+        'abs_gen_mean': 'abs_real_mean', 'abs_gen_std': 'abs_real_std', 'abs_gen_kurt': 'abs_real_kurt'
+    }
     
-    plt.figure(figsize=(12, 8))
-    
-    for i, metric in enumerate(metrics_to_plot, 1):
-        means = [metrics_per_timestep[t].get(metric, {}).get('mean', 0.0) for t in timesteps]
-        variances = [metrics_per_timestep[t].get(metric, {}).get('variance', 0.0) for t in timesteps]
+    # Global plot
+    global_timesteps = sorted(metrics_per_timestep['global'].keys(), reverse=True)
+    if global_timesteps:
+        try:
+            with open(os.path.join(real_metrics_dir, 'real_metrics_global.json'), 'r') as f:
+                real_global = json.load(f)
+        except FileNotFoundError:
+            print(f"Warning: real_metrics_global.json not found in {real_metrics_dir}")
+            real_global = {}
         
-        plt.subplot(2, 3, i)
-        plt.plot(timesteps, means, marker='o', color='blue', label='Mean')
-        plt.fill_between(timesteps,
-                         [m - np.sqrt(v) for m, v in zip(means, variances)],
-                         [m + np.sqrt(v) for m, v in zip(means, variances)],
-                         color='blue', alpha=0.2, label='±1 Std Dev')
-        plt.title(metric)
-        plt.xlabel('Timestep')
-        plt.ylabel('Value')
-        plt.grid(True, alpha=0.3)
-        plt.legend()
+        plt.figure()
+        for i, metric in enumerate(metrics_to_plot, 1):
+            means = [metrics_per_timestep['global'][t].get(metric, {}).get('mean', 0.0) for t in global_timesteps]
+            variances = [metrics_per_timestep['global'][t].get(metric, {}).get('variance', 0.0) for t in global_timesteps]
+            
+            plt.subplot(2, 3, i)
+            plt.plot(global_timesteps, means, color='blue', label='Generated Mean')
+            plt.fill_between(global_timesteps,
+                             [m - np.sqrt(v) for m, v in zip(means, variances)],
+                             [m + np.sqrt(v) for m, v in zip(means, variances)],
+                             color='blue', alpha=0.2, label='±1 Std Dev')
+            
+            real_metric = real_metrics_map[metric]
+            real_value = real_global.get(real_metric, {}).get('mean', None)
+            if real_value is not None:
+                plt.axhline(real_value, color='red', linestyle='--', label='Real Mean')
+            
+            plt.title(metric.replace('_', ' ').title())
+            plt.xlabel('Timestep')
+            plt.ylabel('Value')
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'metrics_vs_timesteps_global.png'), dpi=300)
+        plt.close()
     
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'metrics_vs_timesteps.png'), dpi=300)
-    plt.close()
+    # Yearly plots
+    for year in years:
+        if year not in metrics_per_timestep['years']:
+            print(f"Warning: No metrics for year {year}")
+            continue
+        
+        year_timesteps = sorted(metrics_per_timestep['years'][year].keys(), reverse=True)
+        if not year_timesteps:
+            print(f"Warning: No timesteps for year {year}")
+            continue
+        
+        try:
+            with open(os.path.join(real_metrics_dir, f'real_metrics_{year}.json'), 'r') as f:
+                real_year = json.load(f)
+        except FileNotFoundError:
+            print(f"Warning: real_metrics_{year}.json not found in {real_metrics_dir}")
+            real_year = {}
+        
+        plt.figure()
+        for i, metric in enumerate(metrics_to_plot, 1):
+            means = [metrics_per_timestep['years'][year][t].get(metric, {}).get('mean', 0.0) for t in year_timesteps]
+            variances = [metrics_per_timestep['years'][year][t].get(metric, {}).get('variance', 0.0) for t in year_timesteps]
+            
+            plt.subplot(2, 3, i)
+            plt.plot(year_timesteps, means, color='blue', label='Generated Mean')
+            plt.fill_between(year_timesteps,
+                             [m - np.sqrt(v) for m, v in zip(means, variances)],
+                             [m + np.sqrt(v) for m, v in zip(means, variances)],
+                             color='blue', alpha=0.2, label='±1 Std Dev')
+            
+            real_metric = real_metrics_map[metric]
+            real_value = real_year.get(real_metric, {}).get('mean', None)
+            if real_value is not None:
+                plt.axhline(real_value, color='red', linestyle='--', label='Real Mean')
+            
+            plt.title(f"{metric.replace('_', ' ').title()} (Year {year})")
+            plt.xlabel('Timestep')
+            plt.ylabel('Value')
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'metrics_vs_timesteps_{year}.png'), dpi=300)
+        plt.close()
 
 def print_enhanced_report(metrics_dict, years):
     print("\n=== Validation Report ===")
@@ -365,17 +411,22 @@ def print_enhanced_report(metrics_dict, years):
             variance = year_stats.get(metric, {}).get('variance', 0.0)
             print(f"{year:<6} {metric:<15} {mean:>12.6f} {variance:>12.6f}")
 
-# 5. Main Validation Function ------------------------------------------------
+# 4. Main Validation Function ------------------------------------------------
 
 def run_validation(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     diffusion = DiffusionProcess(device=device, num_timesteps=1000)
     model = ConditionalUNet1D(seq_len=256, channels=config["channels"]).to(device)
-    checkpoint = torch.load(config["model_path"], map_location=device)
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'], strict=True)
-    else:
-        model.load_state_dict(checkpoint, strict=True)
+    try:
+        checkpoint = torch.load(config["model_path"], map_location=device)
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        else:
+            model.load_state_dict(checkpoint, strict=True)
+        print("Model loaded successfully")
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return
     model.eval()
     dataset = FinancialDataset(config["data_path"], scale_factor=1.0)
     years = list(range(2017, 2024))  # 2017-2023
@@ -383,7 +434,7 @@ def run_validation(config):
     step_interval = config.get("step_interval", 50)
     metrics = {}
     all_gen_samples = []
-    metrics_per_timestep = {}
+    metrics_per_timestep = {'global': {}, 'years': {year: {} for year in years}}
     
     for year in years:
         random_dates = dataset.get_random_dates_for_year(year, num_groups_per_year).to(device)
@@ -394,48 +445,54 @@ def run_validation(config):
             condition = {"date": random_dates[i].unsqueeze(0)}
             gen_data, gen_intermediate = generate_samples(
                 model, diffusion, condition,
-                num_samples=1,
+                num_samples=10,  # Increased for better statistics
                 device=device,
                 steps=1000,
                 step_interval=step_interval
             )
             gen_data = dataset.inverse_scale(gen_data)
+            print(f"Year {year}, Sample {i}: gen_data shape={gen_data.shape}, mean={gen_data.mean().item():.6f}, std={gen_data.std().item():.6f}")
             gen_metrics = calculate_metrics(gen_data)
             year_metrics_list.append(gen_metrics)
-            year_gen_samples.append(gen_data.squeeze())
-            all_gen_samples.append(gen_data.squeeze())
+            year_gen_samples.append(gen_data[0])  # Save one sample for visualization
+            all_gen_samples.append(gen_data)
             
-            # Compute metrics for intermediate samples
             for t in gen_intermediate:
                 inter_samples = dataset.inverse_scale(gen_intermediate[t].squeeze(0))
+                print(f"Year {year}, Timestep {t}: inter_samples shape={inter_samples.shape}, mean={inter_samples.mean().item():.6f}, std={inter_samples.std().item():.6f}")
                 inter_metrics = calculate_metrics(inter_samples)
-                if t not in metrics_per_timestep:
-                    metrics_per_timestep[t] = []
-                metrics_per_timestep[t].append(inter_metrics)
+                if t not in metrics_per_timestep['years'][year]:
+                    metrics_per_timestep['years'][year][t] = []
+                metrics_per_timestep['years'][year][t].append(inter_metrics)
+                if t not in metrics_per_timestep['global']:
+                    metrics_per_timestep['global'][t] = []
+                metrics_per_timestep['global'][t].append(inter_metrics)
         
-        # Compute average metrics
         metrics[f'year_{year}'] = average_metrics(year_metrics_list)
+        for t in metrics_per_timestep['years'][year]:
+            metrics_per_timestep['years'][year][t] = average_metrics(metrics_per_timestep['years'][year][t])
         
-        # Save visualizations for one random sample
         save_visualizations(year_gen_samples, year, config["save_dir"])
     
-    # Compute global metrics
-    gen_all = torch.cat(all_gen_samples, dim=0)
-    metrics['global'] = average_metrics([calculate_metrics(gen_all[i].unsqueeze(0)) for i in range(gen_all.shape[0])])
+    # Global metrics
+    if all_gen_samples:
+        gen_all = torch.cat(all_gen_samples, dim=0)  # Shape: [N * num_groups_per_year * num_samples, 256]
+        print(f"Global gen_all shape={gen_all.shape}, mean={gen_all.mean().item():.6f}, std={gen_all.std().item():.6f}")
+        metrics['global'] = calculate_metrics(gen_all)
+    else:
+        print("Warning: No global samples available")
+        metrics['global'] = average_metrics([])
     
-    # Average metrics per timestep
-    for t in metrics_per_timestep:
-        metrics_per_timestep[t] = average_metrics(metrics_per_timestep[t])
+    for t in metrics_per_timestep['global']:
+        metrics_per_timestep['global'][t] = average_metrics(metrics_per_timestep['global'][t])
     
-    # Print report
     print_enhanced_report(metrics, years)
     
-    # Plot metrics vs timesteps
-    plot_metrics_vs_timesteps(metrics_per_timestep, config["save_dir"])
+    plot_metrics_vs_timesteps(metrics_per_timestep, config["save_dir"], years)
     
     output_dir = config["save_dir"]
     os.makedirs(output_dir, exist_ok=True)
-    print(f"\nMetrics vs timesteps plot saved to {os.path.join(output_dir, 'metrics_vs_timesteps.png')}")
+    print(f"\nMetrics vs timesteps plots saved to {output_dir}")
     print(f"\nValidation complete! Results saved to {config['save_dir']}")
 
 if __name__ == "__main__":
