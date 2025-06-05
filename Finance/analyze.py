@@ -140,7 +140,7 @@ def save_visualizations(gen_samples, year, output_dir):
     gen_sample = gen_samples[idx].numpy()
     abs_gen_sample = np.abs(gen_sample)
     
-    plt.figure()
+    plt.figure(figsize=(12, 6))
     
     plt.subplot(1, 2, 1)
     plt.plot(gen_sample, label="Generated", color='blue')
@@ -150,7 +150,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    plt.subplot(1, 2, 1)
+    plt.subplot(1, 2, 2)
     try:
         gen_acf = acf(gen_sample, nlags=20, fft=True)
     except:
@@ -165,7 +165,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.savefig(os.path.join(output_dir, f'year_{year}_original_sample.png'), dpi=300)
     plt.close()
     
-    plt.figure()
+    plt.figure(figsize=(12, 6))
     
     plt.subplot(1, 2, 1)
     plt.plot(abs_gen_sample, label="Abs Generated", color='green')
@@ -190,7 +190,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.savefig(os.path.join(output_dir, f'year_{year}_absolute_sample.png'), dpi=300)
     plt.close()
     
-    plt.figure()
+    plt.figure(figsize=(6, 6))
     stats.probplot(gen_sample, dist="norm", plot=plt)
     plt.title(f"Q-Q Plot (Year {year})")
     plt.xlabel("Theoretical Quantiles")
@@ -210,7 +210,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
     }
     
     # Global plot
-    global_timesteps = sorted(metrics_per_timestep['global'].keys(), reverse=True)
+    global_timesteps = sorted(metrics_per_timestep['global'].keys(), reverse=False)
     if global_timesteps:
         try:
             with open(os.path.join(real_metrics_dir, 'real_metrics_global.json'), 'r') as f:
@@ -219,7 +219,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: real_metrics_global.json not found in {real_metrics_dir}")
             real_global = {}
         
-        plt.figure()
+        plt.figure(figsize=(15, 10))
         for i, metric in enumerate(metrics_to_plot, 1):
             means = [metrics_per_timestep['global'][t].get(metric, {}).get('mean', 0.0) for t in global_timesteps]
             variances = [metrics_per_timestep['global'][t].get(metric, {}).get('variance', 0.0) for t in global_timesteps]
@@ -238,7 +238,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             
             plt.title(metric.replace('_', ' ').title())
             plt.xlabel('Timestep')
-            plt.ylabel('Value')
+            plt.ylabel('Metric Value')
             plt.grid(True, alpha=0.3)
             plt.legend()
         
@@ -252,7 +252,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: No metrics for year {year}")
             continue
         
-        year_timesteps = sorted(metrics_per_timestep['years'][year].keys(), reverse=True)
+        year_timesteps = sorted(metrics_per_timestep['years'][year].keys(), reverse=False)
         if not year_timesteps:
             print(f"Warning: No timesteps for year {year}")
             continue
@@ -283,7 +283,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             
             plt.title(f"{metric.replace('_', ' ').title()} (Year {year})")
             plt.xlabel('Timestep')
-            plt.ylabel('Value')
+            plt.ylabel('Metric Value')
             plt.grid(True, alpha=0.3)
             plt.legend()
         
@@ -371,7 +371,20 @@ def validate_generated_data(config):
         data = torch.load(data_path)
         sequences = data["sequences"]  # Shape: [100, 256], already inverse_scaled
         intermediate_samples = data["intermediate_samples"]  # {t: [100, 256]}
-        metadata = data.get("metadata", {})
+        # Check if timestep 800 exists
+        if 800 not in intermediate_samples:
+            print(f"Error: Timestep 800 not found in {data_path}, available timesteps: {sorted(intermediate_samples.keys())}")
+            continue
+        # Use intermediate_samples[800] as final sequences
+        sequences = intermediate_samples[800]  # Shape: [100, 256]
+        # Map timesteps [1000, ..., 800] to [0, ..., 1000]
+        intermediate_samples_new = {}
+        for t in intermediate_samples:
+            if t < 800:
+                continue  # Skip timesteps < 800
+            t_new = round((1000 - t) * 5)  # Map t to [0, 10, ..., 1000]
+            intermediate_samples_new[t_new] = intermediate_samples[t]
+        intermediate_samples = intermediate_samples_new
         
         print(f"Year {year}: {len(sequences)} samples, intermediate timesteps: {sorted(intermediate_samples.keys(), reverse=True)}")
         
