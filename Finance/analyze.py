@@ -182,10 +182,9 @@ def save_visualizations(gen_samples, year, output_dir):
 def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metrics_dir="real_metrics"):
     os.makedirs(output_dir, exist_ok=True)
     
-    metrics_to_plot = ['gen_mean', 'gen_std', 'gen_kurt', 'abs_gen_mean', 'abs_gen_std', 'abs_gen_kurt']
+    metrics_to_plot = ['gen_mean', 'gen_std', 'gen_kurt']
     real_metrics_map = {
-        'gen_mean': 'real_mean', 'gen_std': 'real_std', 'gen_kurt': 'real_kurt',
-        'abs_gen_mean': 'abs_real_mean', 'abs_gen_std': 'abs_real_std', 'abs_gen_kurt': 'abs_real_kurt'
+        'gen_mean': 'real_mean', 'gen_std': 'real_std', 'gen_kurt': 'real_kurt'
     }
     
     # Global plot
@@ -198,7 +197,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: real_metrics_global.json not found in {real_metrics_dir}")
             real_global = {}
         
-        plt.figure(figsize=(15, 10))
+        plt.figure(figsize=(15, 5))
         for i, metric in enumerate(metrics_to_plot, 1):
             means = [metrics_per_timestep['global'][t].get(metric, {}).get('mean', 0.0) for t in global_timesteps]
             quantiles = [
@@ -209,7 +208,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             q1 = [q[0] for q in quantiles]
             q3 = [q[1] for q in quantiles]
             
-            plt.subplot(2, 3, i)
+            plt.subplot(1, 3, i)
             plt.plot(global_timesteps[::-1], means, color='blue', label='Generated Mean')
             plt.fill_between(global_timesteps[::-1], q1, q3, color='blue', alpha=0.2, label='25%-75% Quantile')
             
@@ -471,8 +470,8 @@ def validate_generated_data(config):
 
 if __name__ == "__main__":
     config = {
-        "generated_dir": "generated_sequences/generation_20250605_022420",
-        "output_dir": "validation_results/generated_20250605_022420",
+        "generated_dir": "generated_sequences/generation_20250605_154545",
+        "output_dir": "validation_results/generated_20250605_154545",
         "data_path": "financial_data/sequences/sequences_256.pt",
         "real_metrics_dir": "real_metrics",
         "years": list(range(2017, 2024))
