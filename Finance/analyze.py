@@ -143,7 +143,7 @@ def save_visualizations(gen_samples, year, output_dir):
     gen_sample = gen_samples[idx].numpy()
     abs_gen_sample = np.abs(gen_sample)
     
-    plt.figure()
+    plt.figure(figsize=(12, 6))
     
     plt.subplot(2, 1, 1)
     plt.plot(gen_sample, label="Generated", color='blue')
@@ -168,7 +168,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.savefig(os.path.join(output_dir, f'year_{year}_original_sample.png'), dpi=300)
     plt.close()
     
-    plt.figure()
+    plt.figure(figsize=(12, 6))
     
     plt.subplot(2, 1, 1)
     plt.plot(abs_gen_sample, label="Abs Generated", color='green')
@@ -193,7 +193,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.savefig(os.path.join(output_dir, f'year_{year}_absolute_sample.png'), dpi=300)
     plt.close()
     
-    plt.figure()
+    plt.figure(figsize=(6, 6))
     stats.probplot(gen_sample, dist="norm", plot=plt)
     plt.title(f"Q-Q Plot (Year {year})")
     plt.xlabel("Theoretical Quantiles")
@@ -213,7 +213,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
     }
     
     # Global plot
-    global_timesteps = sorted(metrics_per_timestep['global'].keys(), reverse=True)
+    global_timesteps = sorted(metrics_per_timestep['global'].keys())
     if global_timesteps:
         try:
             with open(os.path.join(real_metrics_dir, 'real_metrics_global.json'), 'r') as f:
@@ -222,7 +222,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: real_metrics_global.json not found in {real_metrics_dir}")
             real_global = {}
         
-        plt.figure()
+        plt.figure(figsize=(15, 10))
         for i, metric in enumerate(metrics_to_plot, 1):
             means = [metrics_per_timestep['global'][t].get(metric, {}).get('mean', 0.0) for t in global_timesteps]
             variances = [metrics_per_timestep['global'][t].get(metric, {}).get('variance', 0.0) for t in global_timesteps]
@@ -231,8 +231,8 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Debug: Global {metric} at timesteps {global_timesteps[:5]}...: means={means[:5]}, variances={variances[:5]}")
             
             plt.subplot(2, 3, i)
-            plt.plot(global_timesteps, means, color='blue', label='Generated Mean')
-            plt.fill_between(global_timesteps,
+            plt.plot(global_timesteps[::-1], means, color='blue', label='Generated Mean')
+            plt.fill_between(global_timesteps[::-1],
                              [m - np.sqrt(v) for m, v in zip(means, variances)],
                              [m + np.sqrt(v) for m, v in zip(means, variances)],
                              color='blue', alpha=0.2, label='±1 Std Dev')
@@ -258,7 +258,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: No metrics for year {year}")
             continue
         
-        year_timesteps = sorted(metrics_per_timestep['years'][year].keys(), reverse=True)
+        year_timesteps = sorted(metrics_per_timestep['years'][year].keys())
         if not year_timesteps:
             print(f"Warning: No timesteps for year {year}")
             continue
@@ -270,7 +270,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: real_metrics_{year}.json not found in {real_metrics_dir}")
             real_year = {}
         
-        plt.figure()
+        plt.figure(figsize=(15, 10))
         for i, metric in enumerate(metrics_to_plot, 1):
             means = [metrics_per_timestep['years'][year][t].get(metric, {}).get('mean', 0.0) for t in year_timesteps]
             variances = [metrics_per_timestep['years'][year][t].get(metric, {}).get('variance', 0.0) for t in year_timesteps]
@@ -279,8 +279,8 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Debug: Year {year} {metric} at timesteps {year_timesteps[:5]}...: means={means[:5]}, variances={variances[:5]}")
             
             plt.subplot(2, 3, i)
-            plt.plot(year_timesteps, means, color='blue', label='Generated Mean')
-            plt.fill_between(year_timesteps,
+            plt.plot(year_timesteps[::-1], means, color='blue', label='Generated Mean')
+            plt.fill_between(year_timesteps[::-1],
                              [m - np.sqrt(v) for m, v in zip(means, variances)],
                              [m + np.sqrt(v) for m, v in zip(means, variances)],
                              color='blue', alpha=0.2, label='±1 Std Dev')
@@ -384,7 +384,7 @@ def validate_generated_data(config):
         # Ensure sequences are inverse scaled
         sequences = dataset.inverse_scale(sequences)
         
-        # Map timesteps (identity mapping as per user change)
+        # Map timesteps (identity mapping)
         intermediate_samples_new = {}
         for t in intermediate_samples:
             if t > 1000:
@@ -507,6 +507,6 @@ if __name__ == "__main__":
     # Fix random seed
     torch.manual_seed(42)
     np.random.seed(42)
-    random.seed(42)
+    random.seed(0)
     
     validate_generated_data(config)
