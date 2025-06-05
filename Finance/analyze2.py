@@ -248,7 +248,7 @@ def print_enhanced_report(metrics_dict, years):
                 print(f"{year:<4} {metric:<15} {mean:>10.6f} {variance:>10.6f}")
 
 def validate_generated_data(config):
-    years = config.get("years", list(range(2017, 2024))
+    years = config.get("years", list(range(2017, 2024)))
     generated_dir = config["generated_dir"]
     output_dir = config["output_dir"]
     real_metrics_dir = config.get("real_metrics_dir", "real_metrics")
