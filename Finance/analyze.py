@@ -226,7 +226,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             
             plt.subplot(2, 3, i)
             plt.plot(global_timesteps[::-1], means, color='blue', label='Generated Mean')
-            plt.fill_between(global_timesteps,
+            plt.fill_between(global_timesteps[::-1],
                              [m - np.sqrt(v) for m, v in zip(means, variances)],
                              [m + np.sqrt(v) for m, v in zip(means, variances)],
                              color='blue', alpha=0.2, label='±1 Std Dev')
@@ -271,7 +271,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             
             plt.subplot(2, 3, i)
             plt.plot(year_timesteps[::-1], means, color='blue', label='Generated Mean')
-            plt.fill_between(year_timesteps,
+            plt.fill_between(year_timesteps[::-1],
                              [m - np.sqrt(v) for m, v in zip(means, variances)],
                              [m + np.sqrt(v) for m, v in zip(means, variances)],
                              color='blue', alpha=0.2, label='±1 Std Dev')
@@ -369,21 +369,17 @@ def validate_generated_data(config):
         
         print(f"Processing year {year}...")
         data = torch.load(data_path)
-        sequences = data["sequences"]  # Shape: [100, 256], already inverse_scaled
+        # sequences = data["sequences"]  # Shape: [100, 256], already inverse_scaled
         intermediate_samples = data["intermediate_samples"]  # {t: [100, 256]}
-        # Check if timestep 800 exists
-        if 800 not in intermediate_samples:
-            print(f"Error: Timestep 800 not found in {data_path}, available timesteps: {sorted(intermediate_samples.keys())}")
-            continue
         # Use intermediate_samples[800] as final sequences
-        sequences = intermediate_samples[800]  # Shape: [100, 256]
+        sequences = intermediate_samples[640]  # Shape: [100, 256]
         # Map timesteps [0, ..., 800] to [0, ..., 1000]
         intermediate_samples_new = {}
         
         for t in intermediate_samples:
-            if t > 800:
-                continue  # Skip timesteps < 800
-            t_new = round(t / 4 * 5)  # Map t to [0, 10, ..., 1000]
+            if t > 640:
+                continue  # Skip timesteps > 800
+            t_new = round(t / 16 * 25)  # Map t to [0, 10, ..., 1000]
             intermediate_samples_new[t_new] = intermediate_samples[t]
         intermediate_samples = intermediate_samples_new
         
