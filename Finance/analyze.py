@@ -503,12 +503,6 @@ def validate_generated_data(config):
         print("Warning: No global samples found")
         metrics['global'] = average_metrics([])
     
-    # Debug: Print metrics structure
-    print("\nDebug: Metrics structure")
-    print(f"Global metrics: {metrics['global']}")
-    for year in years:
-        if f'gen_metrics_{year}' in metrics:
-            print(f"Year {year}: {metrics[f'gen_metrics_{year}']}")
     
     print_enhanced_report(metrics, years)
     plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metrics_dir)

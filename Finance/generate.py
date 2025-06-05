@@ -147,8 +147,8 @@ def main():
         "channels": [32, 128, 512, 2048],
         "years": list(range(2017, 2024)),
         "samples_per_year": 100,
-        "diffusion_steps": 1000,
-        "step_interval": 20,
+        "diffusion_steps": 200,
+        "step_interval": 10,
         "output_dir": "generated_sequences"
     }
 
