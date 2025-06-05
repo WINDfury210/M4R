@@ -383,7 +383,7 @@ def validate_generated_data(config):
         intermediate_samples = data["intermediate_samples"]
 
         # Inverse scale sequences
-        sequences = dataset.inverse_scale(sequences)
+        # sequences = dataset.inverse_scale(sequences)
         
         # Load real_std for target
         try:
@@ -392,7 +392,7 @@ def validate_generated_data(config):
                 real_std = real_metrics.get('real_std', {}).get('mean', 0.015)
         except FileNotFoundError:
             print(f"Warning: real_metrics_{year}.json not found, using default real_std=0.015")
-            real_std = 10.0
+            real_std = 0.015
 
         # Add noise to increase gen_std
         current_std = sequences.std().item()
@@ -512,8 +512,8 @@ def validate_generated_data(config):
 
 if __name__ == "__main__":
     config = {
-        "generated_dir": "generated_sequences/generation_20250605_141339",
-        "output_dir": "validation_results/generated_20250605_141339",
+        "generated_dir": "generated_sequences/generation_20250605_143239",
+        "output_dir": "validation_results/generated_20250605_143239",
         "data_path": "financial_data/sequences/sequences_256.pt",
         "real_metrics_dir": "real_metrics",
         "years": list(range(2017, 2024))
