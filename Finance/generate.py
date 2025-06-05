@@ -5,26 +5,37 @@ import random
 from datetime import datetime
 from torch.utils.data import Dataset
 from model import ConditionalUNet1D
+import numpy as np
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=1000, device="cpu"):
+    def __init__(self, num_timesteps=500, device="cpu", beta_schedule="linear"):
         self.num_timesteps = num_timesteps
         self.device = device
-        self.betas = self._linear_beta_schedule().to(device)
+        self.betas = self._beta_schedule(beta_schedule).to(device)
         self.alphas = 1. - self.betas
         self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1. - self.alpha_bars)
-    
-    def _linear_beta_schedule(self):
-        return torch.linspace(1e-4, 0.02, self.num_timesteps)
-    
+        self.sqrt_alphas = torch.sqrt(self.alphas)
+        self.sqrt_betas = torch.sqrt(self.betas)
+        self.one_minus_alphas = 1. - self.alphas
+
+    def _beta_schedule(self, schedule_type):
+        if schedule_type == "linear":
+            return torch.linspace(1e-4, 0.01, self.num_timesteps)
+        elif schedule_type == "cosine":
+            steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32) / self.num_timesteps
+            alpha_bar = torch.cos((steps + 0.008) / 1.008 * np.pi / 2) ** 2
+            betas = torch.clamp(1. - alpha_bar[1:] / alpha_bar[:-1], min=1e-4, max=0.999)
+            return betas
+        else:
+            raise ValueError(f"Unknown beta schedule: {schedule_type}")
+
     def add_noise(self, x0, t):
         noise = torch.randn_like(x0, device=self.device)
         sqrt_alpha_bar = self.sqrt_alpha_bars[t].view(-1, 1)
         sqrt_one_minus = self.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         return sqrt_alpha_bar * x0 + sqrt_one_minus * noise, noise
-
 
 class FinancialDataset(Dataset):
     def __init__(self, data_path, scale_factor=1.0):
@@ -36,130 +47,92 @@ class FinancialDataset(Dataset):
         self.scale_factor = scale_factor
         self.sequences = (self.sequences - self.original_mean) / self.original_std * scale_factor
         print(f"Scaled data - Mean: {self.sequences.mean().item():.6f}, Std: {self.sequences.std().item():.6f}")
-        print(f"Total sequences: {len(self.sequences)}")
-        print(f"Sequences shape: {self.sequences.shape}")
-        print(f"Dates shape: {self.dates.shape}")
-        print(f"Dates[:, 0] range: {self.dates[:, 0].min().item():.6f} to {self.dates[:, 0].max().item():.6f}")
-        unique_years = torch.unique(self.dates[:, 0]).tolist()
-        print(f"Unique dates[:, 0] values: {unique_years[:10]}{'...' if len(unique_years) > 10 else ''}")
-    
+        print(f"Total sequences: {len(self.sequences)}, Shape: {self.sequences.shape}")
+
     def __len__(self):
         return len(self.sequences)
-    
+
     def __getitem__(self, idx):
-        return {
-            "sequence": self.sequences[idx],
-            "date": self.dates[idx]
-        }
-    
+        return {"sequence": self.sequences[idx], "date": self.dates[idx]}
+
     def get_annual_start_dates(self, years):
         min_year, max_year = 2017, 2024
-        start_dates = []
-        for year in years:
-            norm_year = (year - min_year) / 8.0
-            start_date = torch.tensor([norm_year, 0.0, 0.0], dtype=torch.float32)
-            start_dates.append(start_date)
+        start_dates = [torch.tensor([(year - min_year) / 8.0, 0.0, 0.0], dtype=torch.float32) for year in years]
         return torch.stack(start_dates)
-    
+
     def get_random_dates_for_year(self, year, num_samples):
         min_year, max_year = 2017, 2024
         norm_year = (year - min_year) / 8.0
-        random_dates = []
-        for _ in range(num_samples):
-            norm_month = random.uniform(0, 1)
-            norm_day = random.uniform(0, 1)
-            random_date = torch.tensor([norm_year, norm_month, norm_day], dtype=torch.float32)
-            random_dates.append(random_date)
-        return torch.stack(random_dates)
-    
+        random_dates = torch.tensor([[norm_year, random.uniform(0, 1), random.uniform(0, 1)] for _ in range(num_samples)], dtype=torch.float32)
+        return random_dates
+
     def inverse_scale(self, sequences):
         return sequences * self.original_std / self.scale_factor + self.original_mean
 
 @torch.no_grad()
-def generate_samples(model, diffusion, condition, num_samples, device, steps=1000, step_interval=50):
+def generate_samples(model, diffusion, condition, num_samples, device, steps=500, step_interval=50):
     model.eval()
-    labels = condition["date"].to(device)
+    labels = condition["date"].to(device)  # [num_samples, 3]
     x = torch.randn(num_samples, 256, device=device)
     intermediate_samples = {}
     step_indices = torch.linspace(diffusion.num_timesteps - 1, 0, steps, dtype=torch.long, device=device)
-    
-    # Determine target timesteps for saving (every step_interval)
-    target_ts = list(range(0, diffusion.num_timesteps + 1, step_interval))[::-1]
-    
-    for i in range(steps):
-        t = step_indices[i]
-        t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
+    target_ts = set(range(0, diffusion.num_timesteps + 1, step_interval)[::-1])
+
+    for t in step_indices:
+        t_tensor = torch.full((num_samples,), t.item(), device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
         sqrt_one_minus_alpha_bar = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1)
         alpha_t = diffusion.alphas[t].view(-1, 1)
-        beta_t = diffusion.betas[t].view(-1, 1)
-        x = (x - (1 - alpha_t) / sqrt_one_minus_alpha_bar * pred_noise) / torch.sqrt(alpha_t)
+        x = (x - diffusion.one_minus_alphas[t].view(-1, 1) / sqrt_one_minus_alpha_bar * pred_noise) / diffusion.sqrt_alphas[t]
         if t > 0:
-            x = x + torch.sqrt(beta_t) * torch.randn_like(x)
-        
-        # Save intermediate samples at target timesteps
+            x += diffusion.sqrt_betas[t].view(-1, 1) * torch.randn_like(x)
+
         if int(t+1) in target_ts:
-            intermediate_samples[int(t+1)] = x.cpu()
-    
+            intermediate_samples[int(t+1)] = x.clone().cpu()
+
+    intermediate_samples[0] = x.clone().cpu()
     return x.cpu(), intermediate_samples
 
 class SequenceGenerator:
     def __init__(self, config):
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.diffusion = DiffusionProcess(device=self.device)
+        self.diffusion = DiffusionProcess(num_timesteps=config["diffusion_steps"], device=self.device, beta_schedule="linear")
         self.model = self._load_model()
         self.dataset = FinancialDataset(config["data_path"])
-        
+
     def _load_model(self):
         model = ConditionalUNet1D(seq_len=256, channels=self.config["channels"]).to(self.device)
         checkpoint = torch.load(self.config["model_path"], map_location=self.device)
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
         model.eval()
         return model
-    
+
     def generate_for_year(self, year, num_samples):
         random_dates = self.dataset.get_random_dates_for_year(year, num_samples)
-        all_sequences = []
-        all_intermediate = {}  # 保存所有样本的中间结果
+        condition = {"date": random_dates.to(self.device)}
+        sequences, intermediate_samples = generate_samples(
+            self.model, self.diffusion, condition, num_samples, self.device,
+            steps=self.config["diffusion_steps"], step_interval=self.config["step_interval"]
+        )
+        sequences = self.dataset.inverse_scale(sequences)
+        intermediate_samples = {t: self.dataset.inverse_scale(samples) for t, samples in intermediate_samples.items()}
         
-        for i in range(num_samples):
-            condition = {"date": random_dates[i].unsqueeze(0).to(self.device)}
-            gen_data, intermediate_samples = generate_samples(
-                self.model, self.diffusion, condition,
-                num_samples=1,
-                device=self.device,
-                steps=self.config["diffusion_steps"],
-                step_interval=self.config.get("step_interval", 50)
-            )
-            gen_data = self.dataset.inverse_scale(gen_data)
-            all_sequences.append(gen_data.squeeze().cpu())
-            
-            # 合并中间结果
-            for t, samples in intermediate_samples.items():
-                if t not in all_intermediate:
-                    all_intermediate[t] = []
-                all_intermediate[t].append(samples.squeeze(0))
+        if 0 in intermediate_samples:
+            assert torch.allclose(sequences, intermediate_samples[0], rtol=1e-5), f"Year {year}: sequences != intermediate_samples[0]"
         
-        # 将中间结果转换为张量
-        for t in all_intermediate:
-            all_intermediate[t] = torch.stack(all_intermediate[t])
-        
-        return torch.stack(all_sequences), all_intermediate
-    
+        return sequences, intermediate_samples
+
     def save_sequences(self, sequences, intermediate_samples, year, output_dir):
         os.makedirs(output_dir, exist_ok=True)
         data = {
             "sequences": sequences,
-            "intermediate_samples": intermediate_samples,  # 保存中间时间步数据
+            "intermediate_samples": intermediate_samples,
             "metadata": {
                 "year": year,
                 "num_samples": len(sequences),
                 "generation_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "step_interval": self.config.get("step_interval", 50)
+                "step_interval": self.config["step_interval"]
             }
         }
         filename = os.path.join(output_dir, f"generated_{year}.pt")
@@ -173,46 +146,31 @@ def main():
         "channels": [32, 128, 512, 2048],
         "years": list(range(2017, 2024)),
         "samples_per_year": 100,
-        "diffusion_steps": 1000,
-        "step_interval": 10,  # 新增：控制中间结果保存间隔
+        "diffusion_steps": 500,
+        "step_interval": 50,
         "output_dir": "generated_sequences"
     }
-    
-    # 固定随机种子确保可重复性
+
     torch.manual_seed(42)
     np.random.seed(42)
     random.seed(42)
-    
-    # Create output directory with timestamp
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = os.path.join(config["output_dir"], f"generation_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Initialize generator
+
     generator = SequenceGenerator(config)
-    
-    # Generate sequences for each year
+
     for year in config["years"]:
         print(f"Generating {config['samples_per_year']} samples for year {year}...")
-        sequences, intermediate_samples = generator.generate_for_year(
-            year, 
-            config["samples_per_year"]
-        )
-        save_path = generator.save_sequences(
-            sequences, 
-            intermediate_samples, 
-            year, 
-            output_dir
-        )
+        sequences, intermediate_samples = generator.generate_for_year(year, config["samples_per_year"])
+        save_path = generator.save_sequences(sequences, intermediate_samples, year, output_dir)
         print(f"Saved to {save_path}")
-    
-    # Save config for reference
-    config_path = os.path.join(output_dir, "generation_config.json")
-    with open(config_path, 'w') as f:
+
+    with open(os.path.join(output_dir, "generation_config.json"), 'w') as f:
         json.dump(config, f, indent=2)
-    
+
     print(f"\nGeneration complete! Results saved to {output_dir}")
 
 if __name__ == "__main__":
-    import numpy as np  # 需要添加的导入
     main()
