@@ -22,7 +22,7 @@ class DiffusionProcess:
 
     def _beta_schedule(self, schedule_type):
         if schedule_type == "linear":
-            return torch.linspace(1e-4, 0.02, self.num_timesteps)
+            return torch.linspace(5e-4, 0.05, self.num_timesteps)
         
         elif schedule_type == "cosine":
             steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32) / self.num_timesteps
@@ -143,9 +143,9 @@ def main():
         "data_path": "financial_data/sequences/sequences_256.pt",
         "channels": [32, 128, 512, 2048],
         "years": list(range(2017, 2024)),
-        "samples_per_year": 1000,
-        "diffusion_steps": 1000,
-        "step_interval": 20,
+        "samples_per_year": 100,
+        "diffusion_steps": 500,
+        "step_interval": 10,
         "output_dir": "generated_sequences"
     }
 
