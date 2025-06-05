@@ -275,9 +275,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             means = [metrics_per_timestep['years'][year][t].get(metric, {}).get('mean', 0.0) for t in year_timesteps]
             variances = [metrics_per_timestep['years'][year][t].get(metric, {}).get('variance', 0.0) for t in year_timesteps]
             
-            # Debug: Print metric values
-            print(f"Debug: Year {year} {metric} at timesteps {year_timesteps[:5]}...: means={means[:5]}, variances={variances[:5]}")
-            
+
             plt.subplot(2, 3, i)
             plt.plot(year_timesteps[::-1], means, color='blue', label='Generated Mean')
             plt.fill_between(year_timesteps[::-1],
@@ -381,8 +379,6 @@ def validate_generated_data(config):
         sequences = data["sequences"]  # Shape: [100, 256]
         intermediate_samples = data["intermediate_samples"]  # {t: [100, 256]}
         
-        # Ensure sequences are inverse scaled
-        sequences = dataset.inverse_scale(sequences)
         
         # Map timesteps (identity mapping)
         intermediate_samples_new = {}
@@ -467,7 +463,7 @@ def validate_generated_data(config):
             global_metrics = calculate_metrics(sample)
             global_metrics_list.append(global_metrics)
         
-        print(f"Debug: Number of global metrics samples: {len(global_metrics_list)}")
+
         metrics['global'] = average_metrics(global_metrics_list, store_individual=True)
         with open(os.path.join(output_dir, 'metrics_global.json'), 'w') as f:
             json.dump(metrics['global'], f, indent=2)
