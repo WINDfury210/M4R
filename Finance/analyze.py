@@ -277,19 +277,34 @@ def print_enhanced_report(metrics_dict, years):
     print("\n[Global Statistics]")
     print(f"{'Metric':<15} {'Mean':>12} {'Variance':>12}")
     print("-" * 39)
-    global_stats = metrics_dict['global']
-    for metric in ['gen_mean', 'gen_std', 'gen_corr', 'gen_acf', 'gen_skew', 'gen_kurt']:
-        mean = global_stats.get(metric, {}).get('mean', 0.0)
-        variance = global_stats.get(metric, {}).get('variance', 0.0)
-        print(f"{metric:<15} {mean:>12.6f} {variance:>12.6f}")
+    global_stats = metrics_dict.get('global', {})
+    
+    # Check if global_stats is a float dictionary or averaged dictionary
+    if all(isinstance(global_stats.get(k), dict) for k in global_stats):
+        for metric in ['gen_mean', 'gen_std', 'gen_corr', 'gen_acf', 'gen_skew', 'gen_kurt']:
+            mean = global_stats.get(metric, {}).get('mean', 0.0)
+            variance = global_stats.get(metric, {}).get('variance', 0.0)
+            print(f"{metric:<15} {mean:>12.6f} {variance:>12.6f}")
+    else:
+        # Handle float dictionary (from calculate_metrics)
+        for metric in ['gen_mean', 'gen_std', 'gen_corr', 'gen_acf', 'gen_skew', 'gen_kurt']:
+            mean = global_stats.get(metric, 0.0)
+            variance = 0.0  # Variance not available for single calculation
+            print(f"{metric:<15} {mean:>12.6f} {variance:>12.6f}")
     
     print("\n[Absolute Value Global Statistics]")
     print(f"{'Metric':<15} {'Mean':>12} {'Variance':>12}")
     print("-" * 39)
-    for metric in ['abs_gen_mean', 'abs_gen_std', 'abs_gen_corr', 'abs_gen_acf', 'abs_gen_skew', 'abs_gen_kurt']:
-        mean = global_stats.get(metric, {}).get('mean', 0.0)
-        variance = global_stats.get(metric, {}).get('variance', 0.0)
-        print(f"{metric:<15} {mean:>12.6f} {variance:>12.6f}")
+    if all(isinstance(global_stats.get(k), dict) for k in global_stats):
+        for metric in ['abs_gen_mean', 'abs_gen_std', 'abs_gen_corr', 'abs_gen_acf', 'abs_gen_skew', 'abs_gen_kurt']:
+            mean = global_stats.get(metric, {}).get('mean', 0.0)
+            variance = global_stats.get(metric, {}).get('variance', 0.0)
+            print(f"{metric:<15} {mean:>12.6f} {variance:>12.6f}")
+    else:
+        for metric in ['abs_gen_mean', 'abs_gen_std', 'abs_gen_corr', 'abs_gen_acf', 'abs_gen_skew', 'abs_gen_kurt']:
+            mean = global_stats.get(metric, 0.0)
+            variance = 0.0
+            print(f"{metric:<15} {mean:>12.6f} {variance:>12.6f}")
     
     print("\n[Yearly Statistics]")
     print(f"{'Year':<6} {'Metric':<15} {'Mean':>12} {'Variance':>12}")
@@ -373,7 +388,8 @@ def validate_generated_data(config):
     if all_gen_samples:
         gen_all = torch.cat(all_gen_samples, dim=0)  # Shape: [N * num_samples, 256]
         print(f"Global gen_all shape={gen_all.shape}, mean={gen_all.mean().item():.6f}, std={gen_all.std().item():.6f}")
-        metrics['global'] = calculate_metrics(gen_all)
+        global_metrics = calculate_metrics(gen_all)
+        metrics['global'] = average_metrics([global_metrics])  # Wrap in average_metrics
         with open(os.path.join(output_dir, 'metrics_global.json'), 'w') as f:
             json.dump(metrics['global'], f, indent=2)
     else:
@@ -383,6 +399,13 @@ def validate_generated_data(config):
     for t in metrics_per_timestep['global']:
         metrics_per_timestep['global'][t] = average_metrics(metrics_per_timestep['global'][t])
     
+    # Debug: Print metrics structure
+    print("\nDebug: Metrics structure")
+    print(f"Global metrics: {metrics['global']}")
+    for year in years:
+        if f'year_{year}' in metrics:
+            print(f"Year {year} metrics: {metrics[f'year_{year}']}")
+    
     print_enhanced_report(metrics, years)
     plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, config.get("real_metrics_dir", "real_metrics"))
     
@@ -391,7 +414,7 @@ def validate_generated_data(config):
 
 if __name__ == "__main__":
     config = {
-        "generated_dir": "generated_sequences/generation_20250605_022420",  # 替换为实际时间戳
+        "generated_dir": "generated_sequences/generation_20250605_022420",  # Replace with actual timestamp
         "output_dir": "validation_results/generated_20250605_022420",
         "real_metrics_dir": "real_metrics",
         "years": list(range(2017, 2024))
