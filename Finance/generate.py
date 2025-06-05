@@ -22,7 +22,7 @@ class DiffusionProcess:
 
     def _beta_schedule(self, schedule_type):
         if schedule_type == "linear":
-            return torch.linspace(1e-4, 0.03, self.num_timesteps)
+            return torch.linspace(1e-3, 0.022, self.num_timesteps)
         
         elif schedule_type == "cosine":
             steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32) / self.num_timesteps
@@ -58,12 +58,12 @@ class FinancialDataset(Dataset):
 
     def get_annual_start_dates(self, years):
         min_year, max_year = 2017, 2024
-        start_dates = [torch.tensor([(year - min_year) / 7.0, 0.0, 0.0], dtype=torch.float32) for year in years]
+        start_dates = [torch.tensor([(year - min_year) / 8.0, 0.0, 0.0], dtype=torch.float32) for year in years]
         return torch.stack(start_dates)
 
     def get_random_dates_for_year(self, year, num_samples):
         min_year, max_year = 2017, 2024
-        norm_year = (year - min_year) / 7.0
+        norm_year = (year - min_year) / 8.0
         random_dates = torch.tensor([[norm_year, random.uniform(0, 1), random.uniform(0, 1)] for _ in range(num_samples)], dtype=torch.float32)
         return random_dates
 
