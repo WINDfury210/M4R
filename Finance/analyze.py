@@ -6,7 +6,20 @@ import random
 import matplotlib.pyplot as plt
 from scipy import stats
 from statsmodels.tsa.stattools import acf
-from datetime import datetime
+
+# FinancialDataset from generate.py
+class FinancialDataset:
+    def __init__(self, data_path, scale_factor=1.0):
+        data = torch.load(data_path)
+        self.sequences = data["sequences"]
+        self.dates = data["start_dates"]
+        self.original_mean = self.sequences.mean().item()
+        self.original_std = self.sequences.std().item()
+        self.scale_factor = scale_factor
+        self.sequences = (self.sequences - self.original_mean) / self.original_std * scale_factor
+    
+    def inverse_scale(self, sequences):
+        return sequences * self.original_std / self.scale_factor + self.original_mean
 
 # 1. Metrics Calculation -----------------------------------------------------
 
@@ -74,7 +87,7 @@ def calculate_metrics(data, dummy=None):
     
     return metrics
 
-def average_metrics(metrics_list):
+def average_metrics(metrics_list, store_individual=False):
     if not metrics_list:
         return {
             'gen_mean': {'mean': 0.0, 'variance': 0.0},
@@ -100,8 +113,15 @@ def average_metrics(metrics_list):
                 'mean': float(np.mean(values)),
                 'variance': float(np.var(values)) if len(values) > 1 else 0.0
             }
+            if store_individual:
+                stats[key]['means'] = values
         else:
-            stats[key] = {'mean': 0.0, 'variance': 0.0}
+            stats[key] = {
+                'mean': 0.0,
+                'variance': 0.0
+            }
+            if store_individual:
+                stats[key]['means'] = []
     return stats
 
 # 2. Visualization Functions -------------------------------------------------
@@ -117,7 +137,7 @@ def save_visualizations(gen_samples, year, output_dir):
     gen_sample = gen_samples[idx].numpy()
     abs_gen_sample = np.abs(gen_sample)
     
-    plt.figure(figsize=(10, 4))
+    plt.figure()
     
     plt.subplot(1, 2, 1)
     plt.plot(gen_sample, label="Generated", color='blue')
@@ -142,7 +162,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.savefig(os.path.join(output_dir, f'year_{year}_original_sample.png'), dpi=300)
     plt.close()
     
-    plt.figure(figsize=(10, 4))
+    plt.figure()
     
     plt.subplot(1, 2, 1)
     plt.plot(abs_gen_sample, label="Abs Generated", color='green')
@@ -167,12 +187,11 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.savefig(os.path.join(output_dir, f'year_{year}_absolute_sample.png'), dpi=300)
     plt.close()
     
-    plt.figure(figsize=(6, 6))
+    plt.figure()
     stats.probplot(gen_sample, dist="norm", plot=plt)
     plt.title(f"Q-Q Plot (Year {year})")
     plt.xlabel("Theoretical Quantiles")
     plt.ylabel("Sample Quantiles")
-    plt.gca().set_aspect('equal', adjustable='box')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'year_{year}_qq_plot.png'), dpi=300)
@@ -197,7 +216,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: real_metrics_global.json not found in {real_metrics_dir}")
             real_global = {}
         
-        plt.figure(figsize=(12, 8))
+        plt.figure()
         for i, metric in enumerate(metrics_to_plot, 1):
             means = [metrics_per_timestep['global'][t].get(metric, {}).get('mean', 0.0) for t in global_timesteps]
             variances = [metrics_per_timestep['global'][t].get(metric, {}).get('variance', 0.0) for t in global_timesteps]
@@ -242,7 +261,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: real_metrics_{year}.json not found in {real_metrics_dir}")
             real_year = {}
         
-        plt.figure(figsize=(12, 8))
+        plt.figure()
         for i, metric in enumerate(metrics_to_plot, 1):
             means = [metrics_per_timestep['years'][year][t].get(metric, {}).get('mean', 0.0) for t in year_timesteps]
             variances = [metrics_per_timestep['years'][year][t].get(metric, {}).get('variance', 0.0) for t in year_timesteps]
@@ -279,17 +298,15 @@ def print_enhanced_report(metrics_dict, years):
     print("-" * 39)
     global_stats = metrics_dict.get('global', {})
     
-    # Check if global_stats is a float dictionary or averaged dictionary
     if all(isinstance(global_stats.get(k), dict) for k in global_stats):
         for metric in ['gen_mean', 'gen_std', 'gen_corr', 'gen_acf', 'gen_skew', 'gen_kurt']:
             mean = global_stats.get(metric, {}).get('mean', 0.0)
             variance = global_stats.get(metric, {}).get('variance', 0.0)
             print(f"{metric:<15} {mean:>12.6f} {variance:>12.6f}")
     else:
-        # Handle float dictionary (from calculate_metrics)
         for metric in ['gen_mean', 'gen_std', 'gen_corr', 'gen_acf', 'gen_skew', 'gen_kurt']:
             mean = global_stats.get(metric, 0.0)
-            variance = 0.0  # Variance not available for single calculation
+            variance = 0.0
             print(f"{metric:<15} {mean:>12.6f} {variance:>12.6f}")
     
     print("\n[Absolute Value Global Statistics]")
@@ -317,26 +334,29 @@ def print_enhanced_report(metrics_dict, years):
             print(f"{year:<6} {metric:<15} {mean:>12.6f} {variance:>12.6f}")
     
     print("\n[Absolute Value Yearly Statistics]")
-    print(f"{'Year':<6} {'Metric':<15} {'Mean':>12} {'Variance':>12}")
-    print("-" * 45)
+    print(f"{'Year':<6} {'Metric':<15} {'Mean':>14} {'Variance':>14}")
+    print("-" * 14)
     for year in years:
-        year_stats = metrics_dict.get(f'year_{year}', {})
+        year_stats = metrics_dict.get(f'y_stats_{year}', {})
         for metric in ['abs_gen_mean', 'abs_gen_std', 'abs_gen_corr', 'abs_gen_acf', 'abs_gen_skew', 'abs_gen_kurt']:
             mean = year_stats.get(metric, {}).get('mean', 0.0)
             variance = year_stats.get(metric, {}).get('variance', 0.0)
-            print(f"{year:<6} {metric:<15} {mean:>12.6f} {variance:>12.6f}")
+            print(f"{year:<6} {metric:<15} {mean:>14.6f} {variance:>14.6f}")
 
-# 4. Main Validation Function ------------------------------------------------
+# 4. Main Validation Function -----------------------------------------------
 
 def validate_generated_data(config):
     years = config.get("years", list(range(2017, 2024)))
     generated_dir = config["generated_dir"]
-    output_dir = config["output_dir"]
+    output_dir = config.get("output_dir")
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Load dataset for inverse scaling
+    dataset = FinancialDataset(config["data_path"])
     
     metrics = {}
     all_gen_samples = []
-    metrics_per_timestep = {'global': {}, 'years': {year: {} for year in years}}
+    metrics_per_timestep = {'global': {}, 'years': {year: [] for year in years}}
     
     for year in years:
         data_path = os.path.join(generated_dir, f"generated_{year}.pt")
@@ -346,8 +366,8 @@ def validate_generated_data(config):
         
         print(f"Processing year {year}...")
         data = torch.load(data_path)
-        sequences = data["sequences"]  # Shape: [num_samples, 256]
-        intermediate_samples = data["intermediate_samples"]  # Dict: {t: [num_samples, 256]}
+        sequences = data["sequences"]  # Shape: [100, 256], already inverse_scaled
+        intermediate_samples = data["intermediate_samples"]  # {t: [100, 256]}
         metadata = data.get("metadata", {})
         
         print(f"Year {year}: {len(sequences)} samples, intermediate timesteps: {sorted(intermediate_samples.keys(), reverse=True)}")
@@ -355,56 +375,69 @@ def validate_generated_data(config):
         year_metrics_list = []
         year_gen_samples = []
         
+        # Process final sequences
         for i in range(len(sequences)):
             gen_data = sequences[i:i+1]  # Shape: [1, 256]
-            print(f"Year {year}, Sample {i}: mean={gen_data.mean().item():.6f}, std={gen_data.std().item():.6f}")
+            print(f"Year {year}, Sample {i}: mean={gen_data.mean().item():.6f}, std={gen_data.std():.item():.6f}")
             gen_metrics = calculate_metrics(gen_data)
             year_metrics_list.append(gen_metrics)
             year_gen_samples.append(gen_data.squeeze())
         
-        metrics[f'year_{year}'] = average_metrics(year_metrics_list)
+        metrics[f'gen_metrics_{year}'] = average_metrics(year_metrics_list)
         all_gen_samples.append(sequences)
         
-        # Compute metrics for intermediate samples
+        # Process intermediate samples
         for t in intermediate_samples:
-            inter_samples = intermediate_samples[t]  # Shape: [num_samples, 256]
+            inter_samples = intermediate_samples[t]  # [100, 256]
+            # Inverse scale to original scale
+            inter_samples = dataset.inverse_scale(inter_samples)
             print(f"Year {year}, Timestep {t}: mean={inter_samples.mean().item():.6f}, std={inter_samples.std().item():.6f}")
-            inter_metrics = calculate_metrics(inter_samples)
-            if t not in metrics_per_timestep['years'][year]:
-                metrics_per_timestep['years'][year][t] = []
-            metrics_per_timestep['years'][year][t].append(inter_metrics)
+            
+            # Compute metrics for each sample
+            inter_metrics_list = []
+            for i in range(len(inter_samples)):
+                sample = inter_samples[i:i+1]  # [1, 256]
+                inter_metrics = calculate_metrics(sample)
+                inter_metrics_list.append(inter_metrics)
+            
+            # Store individual metrics with 'means'
+            inter_metrics = average_metrics(inter_metrics_list, store_individual=True)
+            if t not in metrics_per_timestep['years'].get(year, {}):
+                metrics_per_timestep['years'][t] = {}
+            metrics_per_timestep['years'][year][t] = inter_metrics
             if t not in metrics_per_timestep['global']:
                 metrics_per_timestep['global'][t] = []
-            metrics_per_timestep['global'][t].append(inter_metrics)
+            metrics_per_timestep['global'][t].append(inter_metrics_list)
         
         for t in metrics_per_timestep['years'][year]:
-            metrics_per_timestep['years'][year][t] = average_metrics(metrics_per_timestep['years'][year][t])
+            metrics_per_timestep['years'][year][t] = average_metrics(metrics_per_timestep['years'].get(year).get(t), store_individual=True)
         
         save_visualizations(year_gen_samples, year, output_dir)
         with open(os.path.join(output_dir, f'metrics_{year}.json'), 'w') as f:
-            json.dump(metrics[f'year_{year}'], f, indent=2)
+            json.dump(metrics[f'metrics_{year}'], f, indent=2)
     
     # Global metrics
     if all_gen_samples:
-        gen_all = torch.cat(all_gen_samples, dim=0)  # Shape: [N * num_samples, 256]
-        print(f"Global gen_all shape={gen_all.shape}, mean={gen_all.mean().item():.6f}, std={gen_all.std().item():.6f}")
+        gen_all = torch.cat(all_gen_samples, dim=0)  # Shape: [700, 256]
+        print(f"Global: shape={gen_all.shape}, mean={gen_all.mean().item():.6f}, std={gen_all.std().item():.6f}")
         global_metrics = calculate_metrics(gen_all)
-        metrics['global'] = average_metrics([global_metrics])  # Wrap in average_metrics
+        metrics['global'] = average_metrics([global_metrics])
         with open(os.path.join(output_dir, 'metrics_global.json'), 'w') as f:
             json.dump(metrics['global'], f, indent=2)
+        # Global intermediate samples
+        for t in metrics_per_timestep['global']:
+            global_metrics_list = metrics_per_timestep['global'].get(t)
+            metrics_per_timestep['global'][t] = average_metrics(global_metrics_list, store_individual=True)
     else:
-        print("Warning: No global samples available")
+        print("Warning: No global samples found")
         metrics['global'] = average_metrics([])
-    
-    for t in metrics_per_timestep['global']:
-        metrics_per_timestep['global'][t] = average_metrics(metrics_per_timestep['global'][t])
     
     # Debug: Print metrics structure
     print("\nDebug: Metrics structure")
     print(f"Global metrics: {metrics['global']}")
     for year in years:
-        if f'year_{year}' in metrics:
-            print(f"Year {year} metrics: {metrics[f'year_{year}']}")
+        if f'gen_metrics_{year}' in metrics:
+            print(f"Year {year}: {metrics[f'gen_metrics_{year}']}")
     
     print_enhanced_report(metrics, years)
     plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, config.get("real_metrics_dir", "real_metrics"))
@@ -414,13 +447,14 @@ def validate_generated_data(config):
 
 if __name__ == "__main__":
     config = {
-        "generated_dir": "generated_sequences/generation_20250605_022420",  # Replace with actual timestamp
-        "output_dir": "validation_results/generated_20250605_022420",
+        "generated_dir": "generated_sequences/generation_20250605_032900",
+        "output_dir": "validation_results/generated_20250605_032900",
+        "data_path": "financial_data/sequences/sequences_256.pt",
         "real_metrics_dir": "real_metrics",
         "years": list(range(2017, 2024))
     }
     
-    # Fix random seed for reproducibility
+    # Fix random seed
     torch.manual_seed(42)
     np.random.seed(42)
     random.seed(42)
