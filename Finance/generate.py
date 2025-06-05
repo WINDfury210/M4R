@@ -174,7 +174,7 @@ def main():
         "years": list(range(2017, 2024)),
         "samples_per_year": 100,
         "diffusion_steps": 1000,
-        "step_interval": 50,  # 新增：控制中间结果保存间隔
+        "step_interval": 10,  # 新增：控制中间结果保存间隔
         "output_dir": "generated_sequences"
     }
     
