@@ -382,18 +382,15 @@ def validate_generated_data(config):
                 print(f"Error formatting sample {i}: mean={gen_data.mean().item()}, std={gen_data.std().item()}, error={e}")
                 continue
             gen_metrics = calculate_metrics(gen_data)
+
             if gen_metrics is None:
                 print(f"Skipping sample {i} due to invalid metrics")
                 continue
             year_metrics_list.append(gen_metrics)
             year_gen_samples.append(gen_data.squeeze())
 
-            # For intermediate samples (around line 64)
-            inter_metrics = calculate_metrics(sample)
-            if inter_metrics is None:
-                print(f"Skipping intermediate sample {i} at timestep {t}")
-                continue
-            inter_metrics_list.append(inter_metrics)
+            year_metrics_list.append(gen_metrics)
+            year_gen_samples.append(gen_data.squeeze())
         
         metrics[f'gen_metrics_{year}'] = average_metrics(year_metrics_list, store_individual=True)
         all_gen_samples.append(sequences)
@@ -417,6 +414,9 @@ def validate_generated_data(config):
             for i in range(len(inter_samples)):
                 sample = inter_samples[i:i+1]  # [1, 256]
                 inter_metrics = calculate_metrics(sample)
+                if inter_metrics is None:
+                    print(f"Skipping intermediate sample {i} at timestep {t}")
+                    continue
                 inter_metrics_list.append(inter_metrics)
             
             # Store individual metrics with 'means'
