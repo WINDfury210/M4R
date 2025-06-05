@@ -74,7 +74,7 @@ def calculate_metrics(data, dummy=None):
     if len(abs_sample) > 1 and np.var(abs_sample) > 1e-10 and not np.isnan(abs_sample).any():
         abs_lagged = abs_sample[:-1]
         abs_next = abs_sample[1:]
-        metrics['abs_gen_corr'] = np.corrcoef(abs_lagged, abs_next)[0, 1] if len(abs_lagged) > 1 else 0.0
+        metrics['abs_gen_corr'] = np.corrcoef(abs_lagged, abs_next)[0, 1] if len(lagged) > 1 else 0.0
         try:
             abs_gen_acf = acf(abs_sample, nlags=20, fft=True)[1:]
             metrics['abs_gen_acf'] = float(abs_gen_acf.mean()) if not np.isnan(abs_gen_acf).all() else 0.0
@@ -150,7 +150,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    plt.subplot(1, 2, 2)
+    plt.subplot(1, 2, 1)
     try:
         gen_acf = acf(gen_sample, nlags=20, fft=True)
     except:
@@ -238,12 +238,12 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             
             plt.title(metric.replace('_', ' ').title())
             plt.xlabel('Timestep')
-            plt.ylabel('Probability')
+            plt.ylabel('Value')
             plt.grid(True, alpha=0.3)
             plt.legend()
         
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'metrics_vs_timesteps_global.png'), dpi=300)
+        plt.savefig(os.path.join(output_dir, f'metrics_vs_timesteps_global.png'), dpi=300)
         plt.close()
     
     # Yearly plots
@@ -274,7 +274,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             plt.fill_between(year_timesteps,
                              [m - np.sqrt(v) for m, v in zip(means, variances)],
                              [m + np.sqrt(v) for m, v in zip(means, variances)],
-                             color='blue', label='±1 Std Dev')
+                             color='blue', alpha=0.2, label='±1 Std Dev')
             
             real_metric = real_metrics_map[metric]
             real_value = real_year.get(real_metric, {}).get('mean', None)
@@ -396,7 +396,7 @@ def validate_generated_data(config):
             year_metrics_list.append(gen_metrics)
             year_gen_samples.append(gen_data.squeeze())
         
-        metrics[f'gen_metrics_{year}'] = average_metrics(year_metrics_list)
+        metrics[f'gen_metrics_{year}'] = average_metrics(year_metrics_list, store_individual=True)
         all_gen_samples.append(sequences)
         
         # Process intermediate samples
@@ -423,8 +423,6 @@ def validate_generated_data(config):
             
             # Store individual metrics with 'means'
             inter_metrics = average_metrics(inter_metrics_list, store_individual=True)
-            if t not in metrics_per_timestep['years'][year]:
-                metrics_per_timestep['years'][year][t] = {}
             metrics_per_timestep['years'][year][t] = inter_metrics
             if t not in metrics_per_timestep['global']:
                 metrics_per_timestep['global'][t] = []
@@ -437,14 +435,27 @@ def validate_generated_data(config):
     # Global metrics
     if all_gen_samples:
         gen_all = torch.cat(all_gen_samples, dim=0)  # Shape: [700, 256]
+        # Debug: Verify scale
         try:
             print(f"Global: shape={gen_all.shape}, mean={gen_all.mean().item():.6f}, std={gen_all.std().item():.6f}")
         except ValueError as e:
             print(f"Error formatting global: mean={gen_all.mean().item()}, std={gen_all.std().item()}, error={e}")
-        global_metrics = calculate_metrics(gen_all)
-        metrics['global'] = average_metrics([global_metrics])
+        
+        # Compute metrics for each sample
+        global_metrics_list = []
+        for i in range(gen_all.shape[0]):
+            sample = gen_all[i:i+1]  # Shape: [1, 256]
+            if torch.isnan(sample).any() or torch.isinf(sample).any():
+                print(f"Warning: Invalid global sample {i} (NaN: {torch.isnan(sample).any()}, Inf: {torch.isinf(sample).any()})")
+                continue
+            global_metrics = calculate_metrics(sample)
+            global_metrics_list.append(global_metrics)
+        
+        print(f"Debug: Number of global metrics samples: {len(global_metrics_list)}")
+        metrics['global'] = average_metrics(global_metrics_list, store_individual=True)
         with open(os.path.join(output_dir, 'metrics_global.json'), 'w') as f:
             json.dump(metrics['global'], f, indent=2)
+        
         # Global intermediate samples
         for t in metrics_per_timestep['global']:
             global_metrics_list = metrics_per_timestep['global'][t]
