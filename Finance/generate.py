@@ -22,7 +22,7 @@ class DiffusionProcess:
 
     def _beta_schedule(self, schedule_type):
         if schedule_type == "linear":
-            return torch.linspace(1e-4, 0.01, self.num_timesteps)
+            return torch.linspace(1e-3, 0.1, self.num_timesteps)
         elif schedule_type == "cosine":
             steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32) / self.num_timesteps
             alpha_bar = torch.cos((steps + 0.008) / 1.008 * np.pi / 2) ** 2
