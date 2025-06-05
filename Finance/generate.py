@@ -84,10 +84,7 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=500
         pred_noise = model(x, t_tensor, labels)
         sqrt_one_minus_alpha_bar = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1)
 
-        x = (x - diffusion.one_minus_alphas[t].view(-1, 1) / sqrt_one_minus_alpha_bar * pred_noise) / diffusion.sqrt_alphas[t]
-        if t >= 0:
-            x += diffusion.sqrt_betas[t].view(-1, 1) * torch.randn_like(x)
-
+        x = (x - diffusion.one_minus_alphas[t].view(-1, 1) / sqrt_one_minus_alpha_bar * pred_noise) / diffusion.sqrt_alphas[t]+ diffusion.sqrt_betas[t].view(-1, 1) * torch.randn_like(x)
         if int(t+1) in target_ts:
             intermediate_samples[int(t+1)] = x.clone().cpu()
 
@@ -146,9 +143,9 @@ def main():
         "data_path": "financial_data/sequences/sequences_256.pt",
         "channels": [32, 128, 512, 2048],
         "years": list(range(2017, 2024)),
-        "samples_per_year": 100,
-        "diffusion_steps": 500,
-        "step_interval": 10,
+        "samples_per_year": 1000,
+        "diffusion_steps": 1000,
+        "step_interval": 20,
         "output_dir": "generated_sequences"
     }
 
