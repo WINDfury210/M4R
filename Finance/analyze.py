@@ -393,8 +393,6 @@ def validate_generated_data(config):
             intermediate_samples_new[t_new] = intermediate_samples[t]
         intermediate_samples = intermediate_samples_new
         
-        print(f"Year {year}: {len(sequences)} samples, intermediate timesteps: {sorted(intermediate_samples.keys(), reverse=True)}")
-        print(f"Debug: Sequences - mean={sequences.mean().item():.6f}, std={sequences.std().item():.6f}")
         
         year_metrics_list = []
         year_gen_samples = []
@@ -482,12 +480,6 @@ def validate_generated_data(config):
         print("Warning: No global samples found")
         metrics['global'] = average_metrics([])
     
-    # Debug: Print metrics structure
-    print("\nDebug: Metrics structure")
-    print(f"Global metrics: {metrics['global']}")
-    for year in years:
-        if f'gen_metrics_{year}' in metrics:
-            print(f"Year {year}: {metrics[f'gen_metrics_{year}']}")
     
     print_enhanced_report(metrics, years)
     plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, config.get("real_metrics_dir", "real_metrics"))
