@@ -8,7 +8,7 @@ from model import ConditionalUNet1D
 import numpy as np
 
 class DiffusionProcess:
-    def __init__(self, num_timesteps=500, device="cpu", beta_schedule="linear"):
+    def __init__(self, num_timesteps=1000, device="cpu", beta_schedule="linear"):
         self.num_timesteps = num_timesteps
         self.device = device
         self.betas = self._beta_schedule(beta_schedule).to(device)
@@ -22,7 +22,8 @@ class DiffusionProcess:
 
     def _beta_schedule(self, schedule_type):
         if schedule_type == "linear":
-            return torch.linspace(1e-3, 0.1, self.num_timesteps)
+            return torch.linspace(1e-4, 0.02, self.num_timesteps)
+        
         elif schedule_type == "cosine":
             steps = torch.arange(self.num_timesteps + 1, dtype=torch.float32) / self.num_timesteps
             alpha_bar = torch.cos((steps + 0.008) / 1.008 * np.pi / 2) ** 2
@@ -57,12 +58,12 @@ class FinancialDataset(Dataset):
 
     def get_annual_start_dates(self, years):
         min_year, max_year = 2017, 2024
-        start_dates = [torch.tensor([(year - min_year) / 8.0, 0.0, 0.0], dtype=torch.float32) for year in years]
+        start_dates = [torch.tensor([(year - min_year) / 7.0, 0.0, 0.0], dtype=torch.float32) for year in years]
         return torch.stack(start_dates)
 
     def get_random_dates_for_year(self, year, num_samples):
         min_year, max_year = 2017, 2024
-        norm_year = (year - min_year) / 8.0
+        norm_year = (year - min_year) / 7.0
         random_dates = torch.tensor([[norm_year, random.uniform(0, 1), random.uniform(0, 1)] for _ in range(num_samples)], dtype=torch.float32)
         return random_dates
 
@@ -82,9 +83,9 @@ def generate_samples(model, diffusion, condition, num_samples, device, steps=500
         t_tensor = torch.full((num_samples,), t.item(), device=device, dtype=torch.long)
         pred_noise = model(x, t_tensor, labels)
         sqrt_one_minus_alpha_bar = diffusion.sqrt_one_minus_alpha_bars[t].view(-1, 1)
-        alpha_t = diffusion.alphas[t].view(-1, 1)
+
         x = (x - diffusion.one_minus_alphas[t].view(-1, 1) / sqrt_one_minus_alpha_bar * pred_noise) / diffusion.sqrt_alphas[t]
-        if t > 0:
+        if t >= 0:
             x += diffusion.sqrt_betas[t].view(-1, 1) * torch.randn_like(x)
 
         if int(t+1) in target_ts:
@@ -146,8 +147,8 @@ def main():
         "channels": [32, 128, 512, 2048],
         "years": list(range(2017, 2024)),
         "samples_per_year": 100,
-        "diffusion_steps": 500,
-        "step_interval": 50,
+        "diffusion_steps": 1000,
+        "step_interval": 20,
         "output_dir": "generated_sequences"
     }
 
