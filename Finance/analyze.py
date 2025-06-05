@@ -15,26 +15,19 @@ def calculate_metrics(data, dummy=None):
     if data.dim() == 1:
         data = data.unsqueeze(0)
     
-    # Replace NaN/Inf with 0 for stability
-    data = torch.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-    print(data.any())
-    if data.numel() == 0 or torch.all(data == 0):
-        print(f"Warning: Invalid data in calculate_metrics (shape: {data.shape}, all zeros: {torch.all(data == 0)})")
-        return {
-            'gen_mean': 0.0, 'gen_std': 0.0, 'gen_corr': 0.0, 'gen_acf': 0.0,
-            'gen_skew': 0.0, 'gen_kurt': 0.0,
-            'abs_gen_mean': 0.0, 'abs_gen_std': 0.0, 'abs_gen_corr': 0.0,
-            'abs_gen_acf': 0.0, 'abs_gen_skew': 0.0, 'abs_gen_kurt': 0.0
-        }
+    # Check for NaN/Inf or all zeros
+    if torch.isnan(data).any() or torch.isinf(data).any() or data.numel() == 0 or torch.all(data == 0):
+        print(f"Warning: Invalid data in calculate_metrics (shape: {data.shape}, NaN: {torch.isnan(data).any()}, Inf: {torch.isinf(data).any()}, all zeros: {torch.all(data == 0)})")
+        return None
     
     data_np = data.cpu().numpy()
     if data_np.ndim == 1:
         data_np = data_np[np.newaxis, :]
     
-    metrics['gen_mean'] = float(data_np.mean()) if not np.isnan(data_np.mean()) else 0.0
-    metrics['gen_std'] = float(data_np.std()) if data_np.size > 1 and not np.isnan(data_np.std()) else 0.0
+    metrics['gen_mean'] = float(np.mean(data_np, axis=1)[0]) if not np.isnan(data_np.mean()) else 0.0
+    metrics['gen_std'] = float(np.std(data_np, axis=1)[0]) if data_np.size > 1 and not np.isnan(data_np.std()) else 0.0
     
-    sample = data_np[0] if data_np.shape[0] == 1 else data_np.flatten()
+    sample = data_np[0]
     if len(sample) > 1 and np.var(sample) > 1e-10 and not np.isnan(sample).any():
         lagged = sample[:-1]
         next_val = sample[1:]
@@ -53,10 +46,10 @@ def calculate_metrics(data, dummy=None):
     metrics['gen_kurt'] = float(stats.kurtosis(sample)) if len(sample) > 3 and not np.isnan(sample).any() else 0.0
     
     abs_data_np = np.abs(data_np)
-    metrics['abs_gen_mean'] = float(abs_data_np.mean()) if not np.isnan(abs_data_np.mean()) else 0.0
-    metrics['abs_gen_std'] = float(abs_data_np.std()) if abs_data_np.size > 1 and not np.isnan(abs_data_np.std()) else 0.0
+    metrics['abs_gen_mean'] = float(np.mean(abs_data_np, axis=1)[0]) if not np.isnan(abs_data_np.mean()) else 0.0
+    metrics['abs_gen_std'] = float(np.std(abs_data_np, axis=1)[0]) if abs_data_np.size > 1 and not np.isnan(abs_data_np.std()) else 0.0
     
-    abs_sample = abs_data_np[0] if abs_data_np.shape[0] == 1 else abs_data_np.flatten()
+    abs_sample = abs_data_np[0]
     if len(abs_sample) > 1 and np.var(abs_sample) > 1e-10 and not np.isnan(abs_sample).any():
         abs_lagged = abs_sample[:-1]
         abs_next = abs_sample[1:]
@@ -389,8 +382,18 @@ def validate_generated_data(config):
                 print(f"Error formatting sample {i}: mean={gen_data.mean().item()}, std={gen_data.std().item()}, error={e}")
                 continue
             gen_metrics = calculate_metrics(gen_data)
+            if gen_metrics is None:
+                print(f"Skipping sample {i} due to invalid metrics")
+                continue
             year_metrics_list.append(gen_metrics)
             year_gen_samples.append(gen_data.squeeze())
+
+            # For intermediate samples (around line 64)
+            inter_metrics = calculate_metrics(sample)
+            if inter_metrics is None:
+                print(f"Skipping intermediate sample {i} at timestep {t}")
+                continue
+            inter_metrics_list.append(inter_metrics)
         
         metrics[f'gen_metrics_{year}'] = average_metrics(year_metrics_list, store_individual=True)
         all_gen_samples.append(sequences)
@@ -443,6 +446,7 @@ def validate_generated_data(config):
                 print(f"Warning: Invalid global sample {i} (NaN: {torch.isnan(sample).any()}, Inf: {torch.isinf(sample).any()})")
                 continue
             global_metrics = calculate_metrics(sample)
+            
             global_metrics_list.append(global_metrics)
         
 
