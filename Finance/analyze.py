@@ -18,8 +18,6 @@ class FinancialDataset:
         self.scale_factor = scale_factor
         self.sequences = (self.sequences - self.original_mean) / self.original_std * scale_factor
     
-    def inverse_scale(self, sequences):
-        return sequences * self.original_std / self.scale_factor + self.original_mean
 
 # 1. Metrics Calculation -----------------------------------------------------
 
@@ -30,7 +28,7 @@ def calculate_metrics(data, dummy=None):
         data = data.unsqueeze(0)
     
     # Replace NaN/Inf with 0 for stability
-    data = torch.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+    # data = torch.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
     
     if data.numel() == 0 or torch.all(data == 0):
         print(f"Warning: Invalid data in calculate_metrics (shape: {data.shape}, all zeros: {torch.all(data == 0)})")
