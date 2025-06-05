@@ -382,33 +382,33 @@ def validate_generated_data(config):
         sequences = data["sequences"]  # Shape: [100, 256]
         intermediate_samples = data["intermediate_samples"]
 
-        # # Inverse scale sequences
-        # # sequences = dataset.inverse_scale(sequences)
+        # Inverse scale sequences
+        sequences = dataset.inverse_scale(sequences)
         
-        # # Load real_std for target
-        # try:
-        #     with open(os.path.join(real_metrics_dir, f'real_metrics_{year}.json'), 'r') as f:
-        #         real_metrics = json.load(f)
-        #         real_std = real_metrics.get('real_std', {}).get('mean', 0.015)
-        # except FileNotFoundError:
-        #     print(f"Warning: real_metrics_{year}.json not found, using default real_std=0.015")
-        #     real_std = 0.015
+        # Load real_std for target
+        try:
+            with open(os.path.join(real_metrics_dir, f'real_metrics_{year}.json'), 'r') as f:
+                real_metrics = json.load(f)
+                real_std = real_metrics.get('real_std', {}).get('mean', 0.015)
+        except FileNotFoundError:
+            print(f"Warning: real_metrics_{year}.json not found, using default real_std=0.015")
+            real_std = 10.0
 
-        # # Add noise to increase gen_std
-        # current_std = sequences.std().item()
-        # if current_std < real_std:
-        #     noise_std = np.sqrt(max(real_std**2 - current_std**2, 0))
-        #     noise = torch.randn_like(sequences) * noise_std
-        #     sequences = sequences + noise
-        #     print(f"Year {year}: Added noise with std={noise_std:.6f}, old_std={current_std:.6f}, new_std={sequences.std().item():.6f}")
-        # else:
-        #     print(f"Year {year}: No noise added, current_std={current_std:.6f} >= real_std={real_std:.6f}")
+        # Add noise to increase gen_std
+        current_std = sequences.std().item()
+        if current_std < real_std:
+            noise_std = np.sqrt(max(real_std**2 - current_std**2, 0))
+            noise = torch.randn_like(sequences) * noise_std
+            sequences = sequences + noise
+            print(f"Year {year}: Added noise with std={noise_std:.6f}, old_std={current_std:.6f}, new_std={sequences.std().item():.6f}")
+        else:
+            print(f"Year {year}: No noise added, current_std={current_std:.6f} >= real_std={real_std:.6f}")
 
-        # # Verify sequences vs. intermediate_samples[0]
-        # if 0 in intermediate_samples:
-        #     inter_0 = dataset.inverse_scale(intermediate_samples[0])
-        #     if not torch.allclose(sequences, inter_0, rtol=1e-5, atol=1e-8):
-        #         print(f"Warning: Year {year}: sequences != intermediate_samples[0]")
+        # Verify sequences vs. intermediate_samples[0]
+        if 0 in intermediate_samples:
+            inter_0 = dataset.inverse_scale(intermediate_samples[0])
+            if not torch.allclose(sequences, inter_0, rtol=1e-5, atol=1e-8):
+                print(f"Warning: Year {year}: sequences != intermediate_samples[0]")
 
         # Map timesteps
         intermediate_samples_new = {round(t): intermediate_samples[t] for t in intermediate_samples if t <= 1000}
@@ -490,6 +490,7 @@ def validate_generated_data(config):
             global_metrics = calculate_metrics(sample)
             global_metrics_list.append(global_metrics)
         
+        print(f"Debug: Number of global metrics samples: {len(global_metrics_list)}")
         metrics['global'] = average_metrics(global_metrics_list, store_individual=True)
         with open(os.path.join(output_dir, 'metrics_global.json'), 'w') as f:
             json.dump(metrics['global'], f, indent=2)
@@ -502,6 +503,12 @@ def validate_generated_data(config):
         print("Warning: No global samples found")
         metrics['global'] = average_metrics([])
     
+    # Debug: Print metrics structure
+    print("\nDebug: Metrics structure")
+    print(f"Global metrics: {metrics['global']}")
+    for year in years:
+        if f'gen_metrics_{year}' in metrics:
+            print(f"Year {year}: {metrics[f'gen_metrics_{year}']}")
     
     print_enhanced_report(metrics, years)
     plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metrics_dir)
