@@ -1,0 +1,50 @@
+{
+  "gen_mean": {
+    "mean": 0.0002937951940111816,
+    "variance": 0.0
+  },
+  "gen_std": {
+    "mean": 0.011169281788170338,
+    "variance": 0.0
+  },
+  "gen_corr": {
+    "mean": -0.00403887751706031,
+    "variance": 0.0
+  },
+  "gen_acf": {
+    "mean": -0.004490270490730705,
+    "variance": 0.0
+  },
+  "gen_skew": {
+    "mean": -0.9407179170622679,
+    "variance": 0.0
+  },
+  "gen_kurt": {
+    "mean": 23.5867361361439,
+    "variance": 0.0
+  },
+  "abs_gen_mean": {
+    "mean": 0.007465030066668987,
+    "variance": 0.0
+  },
+  "abs_gen_std": {
+    "mean": 0.008313393220305443,
+    "variance": 0.0
+  },
+  "abs_gen_corr": {
+    "mean": 0.13316950465064442,
+    "variance": 0.0
+  },
+  "abs_gen_acf": {
+    "mean": 0.0870253290706238,
+    "variance": 0.0
+  },
+  "abs_gen_skew": {
+    "mean": 5.11394472068422,
+    "variance": 0.0
+  },
+  "abs_gen_kurt": {
+    "mean": 59.46154740721042,
+    "variance": 0.0
+  }
+}
