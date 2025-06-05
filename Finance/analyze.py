@@ -17,7 +17,7 @@ def calculate_metrics(data, dummy=None):
     
     # Replace NaN/Inf with 0 for stability
     data = torch.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-    print(torch.any(data=='NaN'))
+    print(data.any())
     if data.numel() == 0 or torch.all(data == 0):
         print(f"Warning: Invalid data in calculate_metrics (shape: {data.shape}, all zeros: {torch.all(data == 0)})")
         return {
