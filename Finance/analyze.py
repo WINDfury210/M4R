@@ -471,8 +471,8 @@ def validate_generated_data(config):
 
 if __name__ == "__main__":
     config = {
-        "generated_dir": "generated_sequences/generation_20250605_193026",
-        "output_dir": "validation_results/generated_20250605_193026",
+        "generated_dir": "generated_sequences/generation_20250605_193640",
+        "output_dir": "validation_results/generated_20250605_193640",
         "data_path": "financial_data/sequences/sequences_256.pt",
         "real_metrics_dir": "real_metrics",
         "years": list(range(2017, 2024))
