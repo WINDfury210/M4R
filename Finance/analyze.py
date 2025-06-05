@@ -210,7 +210,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
     }
     
     # Global plot
-    global_timesteps = sorted(metrics_per_timestep['global'].keys(), reverse=True)
+    global_timesteps = sorted(metrics_per_timestep['global'].keys())
     if global_timesteps:
         try:
             with open(os.path.join(real_metrics_dir, 'real_metrics_global.json'), 'r') as f:
@@ -225,7 +225,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             variances = [metrics_per_timestep['global'][t].get(metric, {}).get('variance', 0.0) for t in global_timesteps]
             
             plt.subplot(2, 3, i)
-            plt.plot(global_timesteps, means, color='blue', label='Generated Mean')
+            plt.plot(global_timesteps[::-1], means, color='blue', label='Generated Mean')
             plt.fill_between(global_timesteps,
                              [m - np.sqrt(v) for m, v in zip(means, variances)],
                              [m + np.sqrt(v) for m, v in zip(means, variances)],
@@ -252,7 +252,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: No metrics for year {year}")
             continue
         
-        year_timesteps = sorted(metrics_per_timestep['years'][year].keys(), reverse=True)
+        year_timesteps = sorted(metrics_per_timestep['years'][year].keys())
         if not year_timesteps:
             print(f"Warning: No timesteps for year {year}")
             continue
@@ -270,7 +270,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             variances = [metrics_per_timestep['years'][year][t].get(metric, {}).get('variance', 0.0) for t in year_timesteps]
             
             plt.subplot(2, 3, i)
-            plt.plot(year_timesteps, means, color='blue', label='Generated Mean')
+            plt.plot(year_timesteps[::-1], means, color='blue', label='Generated Mean')
             plt.fill_between(year_timesteps,
                              [m - np.sqrt(v) for m, v in zip(means, variances)],
                              [m + np.sqrt(v) for m, v in zip(means, variances)],
