@@ -379,10 +379,11 @@ def validate_generated_data(config):
         sequences = intermediate_samples[800]  # Shape: [100, 256]
         # Map timesteps [1000, ..., 800] to [0, ..., 1000]
         intermediate_samples_new = {}
+        
         for t in intermediate_samples:
-            if t < 800:
+            if t > 800:
                 continue  # Skip timesteps < 800
-            t_new = round((1000 - t) * 5)  # Map t to [0, 10, ..., 1000]
+            t_new = round(t / 4 * 5)  # Map t to [0, 10, ..., 1000]
             intermediate_samples_new[t_new] = intermediate_samples[t]
         intermediate_samples = intermediate_samples_new
         
