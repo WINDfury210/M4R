@@ -160,7 +160,7 @@ class SequenceAnalyzer:
 
 def main():
     # Configuration
-    generation_dir = "generated_sequences/generation_20230601_143000"  # Example path
+    generation_dir = "generated_sequences/generation_20250605_022420"  # Example path
     output_dir = "analysis_results"
     os.makedirs(output_dir, exist_ok=True)
     
