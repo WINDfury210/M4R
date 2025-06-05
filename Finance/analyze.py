@@ -45,6 +45,9 @@ def calculate_metrics(data, dummy=None):
     if data_np.ndim == 1:
         data_np = data_np[np.newaxis, :]
     
+    # Debug: Print input data stats
+    print(f"Debug: calculate_metrics input - mean={data_np.mean():.6f}, std={data_np.std():.6f}")
+    
     metrics['gen_mean'] = float(data_np.mean()) if not np.isnan(data_np.mean()) else 0.0
     metrics['gen_std'] = float(data_np.std()) if data_np.size > 1 and not np.isnan(data_np.std()) else 0.0
     
@@ -140,7 +143,7 @@ def save_visualizations(gen_samples, year, output_dir):
     gen_sample = gen_samples[idx].numpy()
     abs_gen_sample = np.abs(gen_sample)
     
-    plt.figure(figsize=(12, 6))
+    plt.figure()
     
     plt.subplot(2, 1, 1)
     plt.plot(gen_sample, label="Generated", color='blue')
@@ -165,7 +168,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.savefig(os.path.join(output_dir, f'year_{year}_original_sample.png'), dpi=300)
     plt.close()
     
-    plt.figure(figsize=(12, 6))
+    plt.figure()
     
     plt.subplot(2, 1, 1)
     plt.plot(abs_gen_sample, label="Abs Generated", color='green')
@@ -190,7 +193,7 @@ def save_visualizations(gen_samples, year, output_dir):
     plt.savefig(os.path.join(output_dir, f'year_{year}_absolute_sample.png'), dpi=300)
     plt.close()
     
-    plt.figure(figsize=(6, 6))
+    plt.figure()
     stats.probplot(gen_sample, dist="norm", plot=plt)
     plt.title(f"Q-Q Plot (Year {year})")
     plt.xlabel("Theoretical Quantiles")
@@ -210,7 +213,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
     }
     
     # Global plot
-    global_timesteps = sorted(metrics_per_timestep['global'].keys())
+    global_timesteps = sorted(metrics_per_timestep['global'].keys(), reverse=True)
     if global_timesteps:
         try:
             with open(os.path.join(real_metrics_dir, 'real_metrics_global.json'), 'r') as f:
@@ -219,14 +222,17 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: real_metrics_global.json not found in {real_metrics_dir}")
             real_global = {}
         
-        plt.figure(figsize=(15, 10))
+        plt.figure()
         for i, metric in enumerate(metrics_to_plot, 1):
             means = [metrics_per_timestep['global'][t].get(metric, {}).get('mean', 0.0) for t in global_timesteps]
             variances = [metrics_per_timestep['global'][t].get(metric, {}).get('variance', 0.0) for t in global_timesteps]
             
+            # Debug: Print metric values
+            print(f"Debug: Global {metric} at timesteps {global_timesteps[:5]}...: means={means[:5]}, variances={variances[:5]}")
+            
             plt.subplot(2, 3, i)
-            plt.plot(global_timesteps[::-1], means, color='blue', label='Generated Mean')
-            plt.fill_between(global_timesteps[::-1],
+            plt.plot(global_timesteps, means, color='blue', label='Generated Mean')
+            plt.fill_between(global_timesteps,
                              [m - np.sqrt(v) for m, v in zip(means, variances)],
                              [m + np.sqrt(v) for m, v in zip(means, variances)],
                              color='blue', alpha=0.2, label='±1 Std Dev')
@@ -252,7 +258,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: No metrics for year {year}")
             continue
         
-        year_timesteps = sorted(metrics_per_timestep['years'][year].keys())
+        year_timesteps = sorted(metrics_per_timestep['years'][year].keys(), reverse=True)
         if not year_timesteps:
             print(f"Warning: No timesteps for year {year}")
             continue
@@ -264,14 +270,17 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: real_metrics_{year}.json not found in {real_metrics_dir}")
             real_year = {}
         
-        plt.figure(figsize=(15, 10))
+        plt.figure()
         for i, metric in enumerate(metrics_to_plot, 1):
             means = [metrics_per_timestep['years'][year][t].get(metric, {}).get('mean', 0.0) for t in year_timesteps]
             variances = [metrics_per_timestep['years'][year][t].get(metric, {}).get('variance', 0.0) for t in year_timesteps]
             
+            # Debug: Print metric values
+            print(f"Debug: Year {year} {metric} at timesteps {year_timesteps[:5]}...: means={means[:5]}, variances={variances[:5]}")
+            
             plt.subplot(2, 3, i)
-            plt.plot(year_timesteps[::-1], means, color='blue', label='Generated Mean')
-            plt.fill_between(year_timesteps[::-1],
+            plt.plot(year_timesteps, means, color='blue', label='Generated Mean')
+            plt.fill_between(year_timesteps,
                              [m - np.sqrt(v) for m, v in zip(means, variances)],
                              [m + np.sqrt(v) for m, v in zip(means, variances)],
                              color='blue', alpha=0.2, label='±1 Std Dev')
@@ -369,21 +378,23 @@ def validate_generated_data(config):
         
         print(f"Processing year {year}...")
         data = torch.load(data_path)
-        # sequences = data["sequences"]  # Shape: [100, 256], already inverse_scaled
+        sequences = data["sequences"]  # Shape: [100, 256]
         intermediate_samples = data["intermediate_samples"]  # {t: [100, 256]}
-        # Use intermediate_samples[800] as final sequences
-        sequences = intermediate_samples[640]  # Shape: [100, 256]
-        # Map timesteps [0, ..., 800] to [0, ..., 1000]
-        intermediate_samples_new = {}
         
+        # Ensure sequences are inverse scaled
+        sequences = dataset.inverse_scale(sequences)
+        
+        # Map timesteps (identity mapping as per user change)
+        intermediate_samples_new = {}
         for t in intermediate_samples:
-            if t > 640:
-                continue  # Skip timesteps > 800
-            t_new = round(t / 16 * 25)  # Map t to [0, 10, ..., 1000]
+            if t > 1000:
+                continue
+            t_new = round(t)
             intermediate_samples_new[t_new] = intermediate_samples[t]
         intermediate_samples = intermediate_samples_new
         
         print(f"Year {year}: {len(sequences)} samples, intermediate timesteps: {sorted(intermediate_samples.keys(), reverse=True)}")
+        print(f"Debug: Sequences - mean={sequences.mean().item():.6f}, std={sequences.std().item():.6f}")
         
         year_metrics_list = []
         year_gen_samples = []
@@ -391,7 +402,6 @@ def validate_generated_data(config):
         # Process final sequences
         for i in range(len(sequences)):
             gen_data = sequences[i:i+1]  # Shape: [1, 256]
-            # Debug: Check data validity
             if torch.isnan(gen_data).any() or torch.isinf(gen_data).any():
                 print(f"Warning: Invalid data in sample {i} (NaN: {torch.isnan(gen_data).any()}, Inf: {torch.isinf(gen_data).any()})")
                 continue
@@ -414,7 +424,6 @@ def validate_generated_data(config):
             inter_samples = intermediate_samples[t]  # [100, 256]
             # Inverse scale to original scale
             inter_samples = dataset.inverse_scale(inter_samples)
-            # Debug: Check data validity
             if torch.isnan(inter_samples).any() or torch.isinf(inter_samples).any():
                 print(f"Warning: Invalid data in timestep {t} (NaN: {torch.isnan(inter_samples).any()}, Inf: {torch.isinf(inter_samples).any()})")
                 continue
@@ -445,7 +454,6 @@ def validate_generated_data(config):
     # Global metrics
     if all_gen_samples:
         gen_all = torch.cat(all_gen_samples, dim=0)  # Shape: [700, 256]
-        # Debug: Verify scale
         try:
             print(f"Global: shape={gen_all.shape}, mean={gen_all.mean().item():.6f}, std={gen_all.std().item():.6f}")
         except ValueError as e:
