@@ -245,7 +245,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             print(f"Warning: real_metrics_{year}.json not found in {real_metrics_dir}")
             real_year = {}
         
-        plt.figure(figsize=(15, 10))
+        plt.figure(figsize=(15, 5))
         for i, metric in enumerate(metrics_to_plot, 1):
             means = [metrics_per_timestep['years'][year][t].get(metric, {}).get('mean', 0.0) for t in year_timesteps]
             quantiles = [
@@ -256,7 +256,7 @@ def plot_metrics_vs_timesteps(metrics_per_timestep, output_dir, years, real_metr
             q1 = [q[0] for q in quantiles]
             q3 = [q[1] for q in quantiles]
             
-            plt.subplot(2, 3, i)
+            plt.subplot(1, 3, i)
             plt.plot(year_timesteps[::-1], means, color='blue', label='Generated Mean')
             plt.fill_between(year_timesteps[::-1], q1, q3, color='blue', alpha=0.2, label='25%-75% Quantile')
             
