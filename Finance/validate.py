@@ -430,8 +430,8 @@ def run_validation(config):
     model.eval()
     dataset = FinancialDataset(config["data_path"], scale_factor=1.0)
     years = list(range(2017, 2024))  # 2017-2023
-    num_groups_per_year = config.get("num_groups_per_year", 10)
-    step_interval = config.get("step_interval", 50)
+    num_groups_per_year = config.get("num_groups_per_year", 100)
+    step_interval = config.get("step_interval", 10)
     metrics = {}
     all_gen_samples = []
     metrics_per_timestep = {'global': {}, 'years': {year: {} for year in years}}
